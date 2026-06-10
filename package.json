@@ -1,0 +1,32 @@
+{
+  "name": "aistudio",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "@openrouter/sdk": "^0.2.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.17.0",
+    "nanoid": "^5.0.9",
+    "next": "^16.2.9",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.6",
+    "@types/react-dom": "^19.0.2",
+    "typescript": "^5.7.2",
+    "tailwindcss": "^4.0.0",
+    "@tailwindcss/postcss": "^4.0.0",
+    "eslint": "^9.18.0",
+    "eslint-config-next": "^16.2.9"
+  }
+}
