@@ -1,26 +1,30 @@
 import { NextRequest } from "next/server";
-import { initDB } from "@/lib/db";
-import { getProject, updateProject, deleteProject } from "@/lib/projects";
+import { requireOwnedProject } from "@/lib/auth";
+import { updateProject, deleteProject } from "@/lib/projects";
 
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  await initDB();
+type Params = { params: Promise<{ id: string }> };
+
+export async function GET(_req: NextRequest, { params }: Params) {
   const { id } = await params;
-  const project = await getProject(id);
-  if (!project) return Response.json({ error: "Not found" }, { status: 404 });
-  return Response.json(project);
+  const result = await requireOwnedProject(id);
+  if (!result.ok) return result.response;
+  return Response.json(result.project);
 }
 
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  await initDB();
+export async function PATCH(req: NextRequest, { params }: Params) {
   const { id } = await params;
-  const fields = await req.json();
-  await updateProject(id, fields);
+  const result = await requireOwnedProject(id);
+  if (!result.ok) return result.response;
+
+  await updateProject(id, await req.json());
   return Response.json({ ok: true });
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  await initDB();
+export async function DELETE(_req: NextRequest, { params }: Params) {
   const { id } = await params;
+  const result = await requireOwnedProject(id);
+  if (!result.ok) return result.response;
+
   await deleteProject(id);
   return Response.json({ ok: true });
 }

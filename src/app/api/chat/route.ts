@@ -1,48 +1,55 @@
 import { NextRequest } from "next/server";
-import { initDB } from "@/lib/db";
-import { addMessage, deleteFile, listFiles, listMessages, upsertFile } from "@/lib/projects";
+import { requireOwnedProject } from "@/lib/auth";
+import {
+  addMessage,
+  deleteFile,
+  listFiles,
+  listMessages,
+  safePath,
+  upsertFile,
+  DEFAULT_MODEL,
+} from "@/lib/projects";
 
-export const runtime = "edge";
+const SYSTEM_PROMPT = `You are the app builder inside aistudio, a chat-to-app product. The user describes an app; you build and maintain it as a small set of files that run directly in the browser.
 
-const SYSTEM_PROMPT = `You are the app builder inside a small aistudio-style product. The user chats with you to create and maintain a complete small web app made of files.
+## Runtime — this is critical
+The app is served as ONE self-contained HTML document inside a sandboxed page. There is NO bundler, NO npm, NO server, NO Next.js. What works:
+- index.html is the entry point. Always create it.
+- You may split out styles.css and app.js; they are inlined automatically when referenced via <link rel="stylesheet" href="styles.css"> and <script src="app.js">. Never reference local files any other way (no ES module imports between local files, no images by local path).
+- CDN libraries are allowed via https URLs, e.g. React from esm.sh inside a <script type="module">, or Tailwind via its CDN script. Prefer plain HTML/CSS/JS unless the app genuinely benefits from a library.
+- localStorage/sessionStorage exist but are NOT persistent across reloads (sandboxed origin). Keep state in memory; persistence is not available, so don't promise it.
+- For icons/images use emoji, inline SVG, or data URLs.
 
-Your job:
-- Understand the request, inspect the current files included in context, and produce concrete file changes.
-- Build complete, working implementations for small apps. Do not leave TODOs, fake data flows, or placeholder screens unless the user explicitly asks for a sketch.
-- Prefer simple Next.js App Router React, TypeScript, and CSS that fits in the files you create.
-- Keep apps self-contained and easy to reason about. Avoid unnecessary dependencies.
-- Make UI feel polished, direct, and useful on desktop and mobile.
+## Built-in AI — window.ai
+The platform injects a global \`window.ai\` so generated apps can use AI without any API key:
+- \`await window.ai.chat("prompt")\` → string reply
+- \`await window.ai.chat([{role:"user",content:"..."}], { system: "...", json: true })\` → with history, system prompt, and JSON-mode (returns a JSON string to parse)
+When the user asks for AI features (chatbots, summarizers, generators, graders...), use window.ai. Always show a loading state while awaiting it and handle errors with try/catch.
 
-File protocol:
-When creating, updating, or deleting files, output one fenced JSON block exactly like this:
+## File protocol
+When creating, updating, or deleting files, output one fenced block exactly like this:
 
 \`\`\`file_operation
-[{"action":"upsert","path":"src/app/page.tsx","content":"...complete file content..."},{"action":"delete","path":"src/old.tsx"}]
+[{"action":"upsert","path":"index.html","content":"...complete file content..."},{"action":"delete","path":"old.js"}]
 \`\`\`
 
 Rules:
-- Always include full file content for every upsert. Partial patches are not supported.
-- Use paths relative to the project root, such as src/app/page.tsx, src/app/globals.css, package.json, or README.md.
-- Never use paths with .., absolute paths, or hidden system files.
-- Put only valid JSON inside file_operation fences.
-- After the file_operation block, briefly explain what changed and how to run or inspect it.
-- If the user asks a question instead of requesting changes, answer normally and do not emit file operations.`;
+- Always include FULL file content for every upsert. Partial patches are not supported.
+- Paths are relative (index.html, styles.css, app.js). Never use .., absolute paths, or dotfiles.
+- Only valid JSON inside the fence. Escape content correctly.
+- Outside the fence, write a short, plain summary of what you built or changed (1-3 sentences). No code dumps outside the fence.
+- If the user asks a question instead of requesting changes, answer normally without file operations.
+
+## Quality bar
+- Ship complete, working features. No TODOs, no placeholder screens, no dead buttons.
+- Make it look genuinely good: modern, clean, responsive, sensible spacing and typography, dark-mode friendly colors, useful empty states.
+- When console errors are reported to you, find the root cause and fix it in the files.`;
 
 type FileOperation = {
   action?: "upsert" | "delete";
   path?: string;
   content?: string;
 };
-
-function safePath(path: string) {
-  return (
-    path.length > 0 &&
-    !path.startsWith("/") &&
-    !path.includes("..") &&
-    !path.startsWith(".") &&
-    !path.includes("\\")
-  );
-}
 
 function extractFileOperations(text: string) {
   const operations: FileOperation[] = [];
@@ -54,11 +61,7 @@ function extractFileOperations(text: string) {
       const parsed = JSON.parse(match[1].trim());
       operations.push(...(Array.isArray(parsed) ? parsed : [parsed]));
     } catch {
-      operations.push({
-        action: "upsert",
-        path: "AI_OUTPUT_PARSE_ERROR.txt",
-        content: "The assistant emitted an invalid file_operation JSON block.",
-      });
+      // Ignore malformed blocks; the model's summary still gets saved.
     }
   }
 
@@ -66,12 +69,15 @@ function extractFileOperations(text: string) {
 }
 
 export async function POST(req: NextRequest) {
-  await initDB();
-  const { projectId, content, model = "openrouter/owl-alpha" } = await req.json();
+  const { projectId, content } = await req.json();
 
   if (!projectId || !content?.trim()) {
     return new Response("Missing projectId or content", { status: 400 });
   }
+
+  const result = await requireOwnedProject(projectId);
+  if (!result.ok) return result.response;
+  const { project } = result;
 
   if (!process.env.OPENROUTER_API_KEY) {
     return new Response("Missing OPENROUTER_API_KEY", { status: 500 });
@@ -82,23 +88,24 @@ export async function POST(req: NextRequest) {
   const messages = await listMessages(projectId);
   const files = await listFiles(projectId);
 
-  const fileTree = files.length > 0
-    ? files.map((f: any) => `--- ${f.path} ---\n${f.content}`).join("\n\n")
-    : "No files yet. Create the first useful app files from the user's request.";
+  const fileTree =
+    files.length > 0
+      ? files.map((f) => `--- ${f.path} ---\n${f.content}`).join("\n\n")
+      : "No files yet. Create the first version of the app from the user's request.";
 
-  const history = messages.map((m: any) => ({
+  const history = messages.map((m) => ({
     role: m.role === "assistant" ? "assistant" : "user",
-    content: m.content,
+    content: String(m.content),
   }));
 
-  const stream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model,
+      model: project.model || DEFAULT_MODEL,
       stream: true,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
@@ -108,20 +115,21 @@ export async function POST(req: NextRequest) {
     }),
   });
 
-  if (!stream.ok) {
-    return new Response("OpenRouter error", { status: 502 });
+  if (!upstream.ok || !upstream.body) {
+    const detail = await upstream.text().catch(() => "");
+    return new Response(`OpenRouter error: ${detail.slice(0, 300)}`, { status: 502 });
   }
 
   const encoder = new TextEncoder();
-  const reader = stream.body!.getReader();
+  const reader = upstream.body.getReader();
   let buffer = "";
   let fullText = "";
 
-  const newStream = new ReadableStream({
+  const stream = new ReadableStream({
     async start(controller) {
       try {
         let finished = false;
-        while (true) {
+        while (!finished) {
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -138,19 +146,16 @@ export async function POST(req: NextRequest) {
             }
             try {
               const parsed = JSON.parse(data);
-              const content = parsed.choices?.[0]?.delta?.content;
-              if (content) {
-                fullText += content;
-                controller.enqueue(encoder.encode(content));
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                fullText += delta;
+                controller.enqueue(encoder.encode(delta));
               }
             } catch {}
           }
-
-          if (finished) break;
         }
 
-        const operations = extractFileOperations(fullText);
-        for (const op of operations) {
+        for (const op of extractFileOperations(fullText)) {
           if (!op.path) continue;
           if (op.action === "delete") {
             await deleteFile(projectId, op.path);
@@ -159,18 +164,17 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        await addMessage(projectId, "assistant", fullText);
+        if (fullText.trim()) {
+          await addMessage(projectId, "assistant", fullText);
+        }
         controller.close();
-      } catch (e) {
-        controller.error(e);
+      } catch (error) {
+        controller.error(error);
       }
     },
   });
 
-  return new Response(newStream, {
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Transfer-Encoding": "chunked",
- },
+  return new Response(stream, {
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
   });
 }

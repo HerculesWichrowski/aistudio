@@ -7,12 +7,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "deploy": "vercel --prod"
   },
   "dependencies": {
+    "@clerk/nextjs": "^7.5.1",
+    "@clerk/themes": "^2.4.57",
     "@libsql/client": "^0.14.0",
-    "@openrouter/sdk": "^0.2.1",
-    "clsx": "^2.1.1",
     "lucide-react": "^1.17.0",
     "nanoid": "^5.0.9",
     "next": "^16.2.9",

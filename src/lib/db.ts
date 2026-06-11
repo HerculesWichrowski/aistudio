@@ -1,30 +1,36 @@
-import { createClient, type InArgs } from "@libsql/client/web";
+import { createClient, type Client, type InArgs } from "@libsql/client";
 
-const databaseUrl = process.env.TURSO_DATABASE_URL;
-const authToken = process.env.TURSO_AUTH_TOKEN;
+let _client: Client | null = null;
 
 function client() {
-  if (!databaseUrl) {
-    throw new Error("Missing TURSO_DATABASE_URL");
-  }
-
-  return createClient({
-    url: databaseUrl,
-    authToken,
-  });
+  if (_client) return _client;
+  const url = process.env.TURSO_DATABASE_URL;
+  if (!url) throw new Error("Missing TURSO_DATABASE_URL");
+  _client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN });
+  return _client;
 }
 
-async function turso(sql: string, args: InArgs = []) {
+export async function turso(sql: string, args: InArgs = []) {
   const result = await client().execute({ sql, args });
   return { rows: result.rows };
 }
 
-export async function initDB() {
+let ready: Promise<void> | null = null;
+
+export function initDB() {
+  ready ??= migrate();
+  return ready;
+}
+
+async function migrate() {
   await turso(`CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT DEFAULT '',
     model TEXT DEFAULT 'openrouter/owl-alpha',
+    user_id TEXT DEFAULT '',
+    visibility TEXT DEFAULT 'private',
+    shared_emails TEXT DEFAULT '',
     created_at INTEGER DEFAULT (unixepoch()),
     updated_at INTEGER DEFAULT (unixepoch())
   )`);
@@ -44,6 +50,15 @@ export async function initDB() {
     updated_at INTEGER DEFAULT (unixepoch())
   )`);
   await turso(`CREATE UNIQUE INDEX IF NOT EXISTS files_project_path_idx ON files (project_id, path)`);
-}
 
-export { turso };
+  // Columns added after the original schema; ignore "duplicate column" on existing DBs.
+  for (const column of [
+    "user_id TEXT DEFAULT ''",
+    "visibility TEXT DEFAULT 'private'",
+    "shared_emails TEXT DEFAULT ''",
+  ]) {
+    try {
+      await turso(`ALTER TABLE projects ADD COLUMN ${column}`);
+    } catch {}
+  }
+}

@@ -1,192 +1,198 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Expand, Plus, Trash2 } from "lucide-react";
+import { Show, SignInButton, UserButton, useUser } from "@clerk/nextjs";
+import { ArrowUp, Globe, Link2, Trash2 } from "lucide-react";
 
 type Project = {
   id: string;
   name: string;
   description: string;
-  model: string;
+  visibility: string;
   updated_at: number;
 };
 
-const starterPrompt =
-  "Build a polished small app with clear navigation, useful empty states, responsive layout, and complete CRUD for the core data. Use simple local state unless I ask for a backend.";
+function nameFromPrompt(prompt: string) {
+  const words = prompt.replace(/\s+/g, " ").trim().split(" ").slice(0, 6).join(" ");
+  return (words.length > 48 ? `${words.slice(0, 48)}…` : words) || "Untitled app";
+}
+
+function timeAgo(unix: number) {
+  const seconds = Math.max(1, Math.floor(Date.now() / 1000 - unix));
+  if (seconds < 3600) return `${Math.max(1, Math.floor(seconds / 60))}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
 
 export default function Home() {
   const router = useRouter();
+  const { isSignedIn } = useUser();
   const [projects, setProjects] = useState<Project[]>([]);
-  const [showModal, setShowModal] = useState(false);
-  const [name, setName] = useState("");
-  const [prompt, setPrompt] = useState(starterPrompt);
+  const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
 
-  async function fetchProjects() {
-    setLoading(true);
-    const response = await fetch("/api/projects");
-    setProjects(await response.json());
-    setLoading(false);
-  }
-
   useEffect(() => {
-    fetchProjects();
-  }, []);
+    if (!isSignedIn) return;
+    fetch("/api/projects")
+      .then((response) => (response.ok ? response.json() : []))
+      .then(setProjects)
+      .finally(() => setLoading(false));
+  }, [isSignedIn]);
 
-  const sortedProjects = useMemo(
-    () => [...projects].sort((a, b) => b.updated_at - a.updated_at),
-    [projects]
-  );
-
-  async function createProject(event: FormEvent) {
-    event.preventDefault();
-    if (!name.trim() || creating) return;
+  async function createProject(event?: FormEvent) {
+    event?.preventDefault();
+    const trimmed = prompt.trim();
+    if (!trimmed || creating) return;
 
     setCreating(true);
-    const response = await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: name.trim(),
-        description: prompt.trim().slice(0, 180),
-      }),
-    });
-    const project = await response.json();
-    router.push(`/projects/${project.id}?prompt=${encodeURIComponent(prompt.trim())}`);
+    try {
+      const response = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nameFromPrompt(trimmed), description: trimmed.slice(0, 180) }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const project = await response.json();
+      router.push(`/projects/${project.id}?prompt=${encodeURIComponent(trimmed)}`);
+    } catch {
+      setCreating(false);
+    }
   }
 
   async function deleteProject(id: string) {
-    if (!confirm("Delete this app, including chat and files?")) return;
+    if (!confirm("Delete this app, including its chat and files?")) return;
     await fetch(`/api/projects/${id}`, { method: "DELETE" });
     setProjects((current) => current.filter((project) => project.id !== id));
   }
 
   return (
-    <main className="shell">
-      <div className="container">
-        <header className="topbar">
-          <Link className="brand" href="/">
-            <span className="mark">ai</span>
-            <span>
-              <strong>aistudio</strong>
-              <span className="eyebrow" style={{ display: "block" }}>
-                one open workspace for small apps
-              </span>
-            </span>
-          </Link>
-          <button className="button" onClick={() => setShowModal(true)}>
-            <Plus size={17} />
-            New app
-          </button>
-        </header>
+    <div className="home">
+      <header className="topbar">
+        <a className="brand" href="/">
+          <span className="brand-mark">ai</span>
+          aistudio
+        </a>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Show when="signed-out">
+            <SignInButton mode="modal">
+              <button className="btn">Sign in</button>
+            </SignInButton>
+          </Show>
+          <Show when="signed-in">
+            <UserButton />
+          </Show>
+        </div>
+      </header>
 
-        <section className="hero">
-          <h1 className="title">Chat an app into files. Keep every project in one place.</h1>
-          <p className="lead">
-            A minimal Lovable/v0-style builder for small apps: project overview, chat IDE,
-            generated files, manual CRUD, and fullscreen focus mode powered by OpenRouter.
-          </p>
-          <div className="hero-actions">
-            <button className="button" onClick={() => setShowModal(true)}>
-              <Plus size={17} />
-              Start from prompt
-            </button>
-            {sortedProjects[0] && (
-              <Link className="ghost-button" href={`/projects/${sortedProjects[0].id}`}>
-                Continue latest
-                <ArrowRight size={16} />
-              </Link>
-            )}
-          </div>
-        </section>
-
-        {loading ? (
-          <div className="empty-state">Loading projects...</div>
-        ) : sortedProjects.length === 0 ? (
-          <div className="empty-state">
+      <Show when="signed-out">
+        <main className="home-main">
+          <div className="hero-signin">
             <div>
-              <strong>No apps yet</strong>
-              <p style={{ marginTop: 8 }}>Create one from a prompt and the workspace will save files as you chat.</p>
-            </div>
-          </div>
-        ) : (
-          <section className="project-grid" aria-label="Projects">
-            {sortedProjects.map((project) => (
-              <article className="project-card" key={project.id}>
-                <div>
-                  <h3>{project.name}</h3>
-                  <p style={{ marginTop: 8 }}>
-                    {project.description || "No description yet."}
-                  </p>
-                </div>
-                <p>
-                  Updated{" "}
-                  {project.updated_at
-                    ? new Date(project.updated_at * 1000).toLocaleDateString()
-                    : "recently"}
-                </p>
-                <div className="card-actions">
-                  <Link className="button" href={`/projects/${project.id}`} style={{ flex: 1 }}>
-                    Open
-                    <ArrowRight size={16} />
-                  </Link>
-                  <Link className="icon-button" href={`/projects/${project.id}/fullscreen`} title="Open fullscreen">
-                    <Expand size={17} />
-                  </Link>
-                  <button className="icon-button" onClick={() => deleteProject(project.id)} title="Delete app">
-                    <Trash2 size={17} />
-                  </button>
-                </div>
-              </article>
-            ))}
-          </section>
-        )}
-      </div>
-
-      {showModal && (
-        <div className="modal-backdrop" onClick={() => setShowModal(false)}>
-          <form className="modal-panel" onSubmit={createProject} onClick={(event) => event.stopPropagation()}>
-            <div>
-              <h2>Create app</h2>
-              <p className="eyebrow" style={{ marginTop: 6 }}>
-                This first prompt becomes the starting point for the app builder.
+              <h1 className="home-title">Chat apps into existence.</h1>
+              <p className="home-sub">
+                Describe an app, watch it build itself, then share it with a link.
+                AI included — apps you make can use AI too, no keys needed.
               </p>
             </div>
-            <div className="field">
-              <label htmlFor="name">Name</label>
-              <input
-                id="name"
-                className="input"
-                autoFocus
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="Inventory tracker"
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="prompt">Entry prompt</label>
-              <textarea
-                id="prompt"
-                className="textarea"
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-              />
-            </div>
-            <div className="split-actions">
-              <button className="ghost-button" type="button" onClick={() => setShowModal(false)}>
-                Cancel
+            <SignInButton mode="modal">
+              <button className="btn" style={{ minHeight: 38, padding: "0 18px" }}>
+                Get started
               </button>
-              <button className="button" type="submit" disabled={creating || !name.trim()}>
-                {creating ? "Creating..." : "Create and open"}
+            </SignInButton>
+          </div>
+        </main>
+      </Show>
+
+      <Show when="signed-in">
+        <main className="home-main">
+          <h1 className="home-title">What should we build?</h1>
+          <p className="home-sub">Describe the app. You can refine it in chat afterwards.</p>
+
+          <form className="prompt-card" onSubmit={createProject}>
+            <textarea
+              value={prompt}
+              autoFocus
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void createProject();
+                }
+              }}
+              placeholder="A flashcard trainer that uses AI to generate cards from any topic I type in..."
+            />
+            <div className="prompt-card-foot">
+              <span className="muted" style={{ fontSize: 12 }}>
+                Enter to create · Shift+Enter for newline
+              </span>
+              <button className="btn" type="submit" disabled={creating || !prompt.trim()}>
+                {creating ? "Creating…" : "Build"}
+                <ArrowUp size={14} />
               </button>
             </div>
           </form>
-        </div>
-      )}
-    </main>
+
+          <div className="section-head">
+            <h2>Your apps</h2>
+            {projects.length > 0 && <span className="muted">{projects.length}</span>}
+          </div>
+
+          {loading ? (
+            <div className="empty">Loading…</div>
+          ) : projects.length === 0 ? (
+            <div className="empty">No apps yet. Describe one above to get started.</div>
+          ) : (
+            <div className="project-grid">
+              {projects.map((project) => (
+                <div
+                  className="project-card"
+                  key={project.id}
+                  role="button"
+                  tabIndex={0}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => router.push(`/projects/${project.id}`)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") router.push(`/projects/${project.id}`);
+                  }}
+                >
+                  <h3>{project.name}</h3>
+                  <p className="desc">{project.description || "No description."}</p>
+                  <div className="card-foot">
+                    <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {timeAgo(project.updated_at)}
+                      {project.visibility === "public" && (
+                        <span className="badge public">
+                          <Globe size={10} /> public
+                        </span>
+                      )}
+                    </span>
+                    <span className="actions" onClick={(event) => event.stopPropagation()}>
+                      <a
+                        className="btn-icon"
+                        href={`/p/${project.id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Open app"
+                      >
+                        <Link2 size={14} />
+                      </a>
+                      <button
+                        className="btn-icon btn-danger"
+                        onClick={() => deleteProject(project.id)}
+                        title="Delete app"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </main>
+      </Show>
+    </div>
   );
 }
