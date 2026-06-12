@@ -16,6 +16,8 @@ import {
   FilePlus2,
   Eye,
   KeyRound,
+  Loader2,
+  Pencil,
   RotateCw,
   Save,
   Settings2,
@@ -26,7 +28,12 @@ import {
 import ShareDialog from "./ShareDialog";
 import PageLoader from "./PageLoader";
 import BrandLogo from "./BrandLogo";
-import { parseBuilderStream, type BuildFileStatus } from "@/lib/build-stream-client";
+import {
+  parseBuilderStream,
+  parseStoredFileOps,
+  type BuildFileStatus,
+  type StoredFileOp,
+} from "@/lib/build-stream-client";
 
 type Message = { id: string; role: string; content: string };
 type ProjectFile = { id: string; path: string; content: string };
@@ -49,79 +56,143 @@ type Project = {
 type ConsoleEntry = { id: number; level: string; text: string };
 type AppData = Record<string, Record<string, unknown>[]>;
 
-const FILE_OP_REGEX = /```file_operation\s*([\s\S]*?)```/g;
+function chipClassForStatus(status: BuildFileStatus["status"] | StoredFileOp["status"]) {
+  if (status === "start") return "chip chip-working";
+  if (status === "error") return "chip chip-error";
+  if (status === "done" || status === "deleted") return "chip chip-done";
+  return "chip";
+}
 
-function parseAssistantMessage(content: string) {
-  const paths: string[] = [];
-  let text = content.replace(FILE_OP_REGEX, (_match, body: string) => {
-    try {
-      const ops = JSON.parse(body.trim());
-      for (const op of Array.isArray(ops) ? ops : [ops]) {
-        if (op?.path) paths.push(`${op.action === "delete" ? "deleted " : ""}${op.path}`);
-      }
-    } catch {}
-    return "";
-  });
-
-  let working = false;
-  const open = text.indexOf("```file_operation");
-  if (open !== -1) {
-    text = text.slice(0, open);
-    working = true;
-  }
-
-  return { text: text.replace(/\n{3,}/g, "\n\n").trim(), paths, working };
+function FileChip({
+  path,
+  status,
+  error,
+  deleted,
+}: {
+  path: string;
+  status: BuildFileStatus["status"] | StoredFileOp["status"];
+  error?: string;
+  deleted?: boolean;
+}) {
+  return (
+    <span className={chipClassForStatus(status)} title={error}>
+      {status === "start" ? (
+        <Loader2 size={11} className="chip-spinner" />
+      ) : (
+        <FileCode size={11} />
+      )}
+      {deleted ? "removed " : ""}
+      {path}
+      {status === "error" ? ` (${error ?? "failed"})` : ""}
+    </span>
+  );
 }
 
 function AssistantMessage({
   content,
   streaming,
   buildEvents = [],
-  building,
+  phase = "idle",
 }: {
   content: string;
   streaming?: boolean;
   buildEvents?: BuildFileStatus[];
-  building?: boolean;
+  phase?: "idle" | "planning" | "building";
 }) {
-  const parsed = useMemo(() => parseAssistantMessage(content), [content]);
-  const text = parsed.text || content;
+  const parsed = useMemo(() => parseStoredFileOps(content), [content]);
+  const text = parsed.text;
+  const storedOps = parsed.ops;
+  const showLiveEvents = buildEvents.length > 0;
+  const fileItems = showLiveEvents
+    ? buildEvents.map((event) => ({
+        key: event.path,
+        path: event.path,
+        status: event.status,
+        error: event.error,
+        deleted: event.status === "deleted",
+      }))
+    : storedOps.map((op) => ({
+        key: op.path,
+        path: op.path,
+        status: op.status ?? "done",
+        error: op.error,
+        deleted: op.action === "delete" || op.status === "deleted",
+      }));
+
+  const planning = phase === "planning";
+  const building = phase === "building";
 
   return (
-    <div className="msg">
-      <span className="msg-role">Builder</span>
-      {text && <div className="msg-body">{text}</div>}
-      {(parsed.paths.length > 0 || buildEvents.length > 0 || parsed.working) && (
+    <div className="msg assistant">
+      {text ? <div className="msg-body">{text}</div> : null}
+      {fileItems.length > 0 && (
         <div className="chips">
-          {parsed.paths.map((path) => (
-            <span className="chip" key={path}>
-              <FileCode size={11} />
-              {path}
-            </span>
+          {fileItems.map((item) => (
+            <FileChip
+              deleted={item.deleted}
+              error={item.error}
+              key={item.key}
+              path={item.path}
+              status={item.status}
+            />
           ))}
-          {buildEvents.map((event) => (
-            <span
-              className={`chip ${event.status === "start" ? "working" : ""} ${event.status === "error" ? "chip-error" : ""} ${event.status === "done" || event.status === "deleted" ? "chip-done" : ""}`}
-              key={event.path}
-            >
-              <FileCode size={11} />
-              {event.status === "deleted" ? "removed " : ""}
-              {event.path}
-              {event.status === "start" ? "…" : ""}
-              {event.status === "error" ? ` (${event.error ?? "failed"})` : ""}
-            </span>
-          ))}
-          {parsed.working && <span className="chip working">writing files…</span>}
         </div>
       )}
-      {building && buildEvents.length === 0 && (
-        <span className="chip working">Applying changes…</span>
+      {planning && !text && (
+        <div className="msg-status">
+          <Loader2 size={13} className="chip-spinner" />
+          <span>Thinking…</span>
+        </div>
       )}
-      {streaming && !text && buildEvents.length === 0 && !parsed.working && (
-        <span className="thinking">
-          <i /> <i /> <i />
-        </span>
+      {building && fileItems.length === 0 && (
+        <div className="msg-status">
+          <Loader2 size={13} className="chip-spinner" />
+          <span>Working on your app…</span>
+        </div>
       )}
+      {streaming && planning && text && (
+        <span className="stream-cursor" aria-hidden />
+      )}
+    </div>
+  );
+}
+
+function UserMessage({
+  content,
+  disabled,
+  onEdit,
+  onRedo,
+}: {
+  content: string;
+  disabled?: boolean;
+  onEdit: () => void;
+  onRedo: () => void;
+}) {
+  return (
+    <div className="msg user">
+      <div className="msg-user-row">
+        <div className="msg-body">{content}</div>
+        <div className="msg-actions">
+          <button
+            className="msg-action"
+            disabled={disabled}
+            onClick={onEdit}
+            title="Edit message"
+            type="button"
+          >
+            <Pencil size={12} />
+          </button>
+          <button
+            className="msg-action"
+            disabled={disabled}
+            onClick={onRedo}
+            title="Redo from here"
+            type="button"
+          >
+            <RotateCw size={12} />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -277,8 +348,7 @@ export default function AppWorkspace() {
   const [input, setInput] = useState("");
   const [streamChat, setStreamChat] = useState("");
   const [buildEvents, setBuildEvents] = useState<BuildFileStatus[]>([]);
-  const [isBuilding, setIsBuilding] = useState(false);
-  const [planStreaming, setPlanStreaming] = useState(false);
+  const [streamPhase, setStreamPhase] = useState<"idle" | "planning" | "building">("idle");
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
@@ -368,29 +438,44 @@ export default function AppWorkspace() {
     setFiles(await filesResponse.json());
   }
 
+  async function truncateMessages(fromMessageId: string, includeMessage: boolean) {
+    await fetch(
+      `/api/messages?projectId=${encodeURIComponent(id)}&fromMessageId=${encodeURIComponent(fromMessageId)}&include=${includeMessage}`,
+      { method: "DELETE" }
+    );
+    const messagesResponse = await fetch(`/api/messages?projectId=${id}`);
+    setMessages(await messagesResponse.json());
+  }
+
   const sendMessage = useCallback(
-    async (forcedContent?: string) => {
+    async (forcedContent?: string, options?: { skipUserInsert?: boolean }) => {
       const content = (forcedContent ?? input).trim();
       if (!content || loadingRef.current) return;
 
       loadingRef.current = true;
-      setInput("");
+      if (!options?.skipUserInsert) setInput("");
       setLoading(true);
       setStreamChat("");
       setBuildEvents([]);
-      setIsBuilding(false);
-      setPlanStreaming(true);
+      setStreamPhase("planning");
       setChatError("");
-      setMessages((current) => [
-        ...current,
-        { id: crypto.randomUUID(), role: "user", content },
-      ]);
+
+      if (!options?.skipUserInsert) {
+        setMessages((current) => [
+          ...current,
+          { id: crypto.randomUUID(), role: "user", content },
+        ]);
+      }
 
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ projectId: id, content }),
+          body: JSON.stringify({
+            projectId: id,
+            content,
+            skipUserInsert: options?.skipUserInsert === true,
+          }),
         });
 
         if (!response.ok || !response.body) {
@@ -409,24 +494,25 @@ export default function AppWorkspace() {
             const parsed = parseBuilderStream(raw);
             setStreamChat(parsed.chat);
             setBuildEvents(parsed.events);
-            setPlanStreaming(!parsed.planDone && parsed.events.length === 0);
-            setIsBuilding(parsed.planDone || parsed.events.length > 0);
+            if (parsed.planDone || parsed.events.length > 0) {
+              setStreamPhase("building");
+            } else {
+              setStreamPhase("planning");
+            }
           }
           if (done) break;
         }
 
         setStreamChat("");
         setBuildEvents([]);
-        setIsBuilding(false);
-        setPlanStreaming(false);
+        setStreamPhase("idle");
         await refreshData();
         refreshPreview();
         setTab("preview");
       } catch (error) {
         setStreamChat("");
         setBuildEvents([]);
-        setIsBuilding(false);
-        setPlanStreaming(false);
+        setStreamPhase("idle");
         setChatError(error instanceof Error ? error.message : "Request failed");
       } finally {
         loadingRef.current = false;
@@ -435,6 +521,18 @@ export default function AppWorkspace() {
     },
     [id, input, refreshPreview]
   );
+
+  async function editMessage(messageId: string, content: string) {
+    if (loadingRef.current) return;
+    await truncateMessages(messageId, true);
+    setInput(content);
+  }
+
+  async function redoMessage(messageId: string, content: string) {
+    if (loadingRef.current) return;
+    await truncateMessages(messageId, false);
+    void sendMessage(content, { skipUserInsert: true });
+  }
 
   useEffect(() => {
     const starter = searchParams.get("prompt");
@@ -605,20 +703,23 @@ export default function AppWorkspace() {
             )}
             {messages.map((message) =>
               message.role === "user" ? (
-                <div className="msg user" key={message.id}>
-                  <span className="msg-role">You</span>
-                  <div className="msg-body">{message.content}</div>
-                </div>
+                <UserMessage
+                  content={message.content}
+                  disabled={loading}
+                  key={message.id}
+                  onEdit={() => void editMessage(message.id, message.content)}
+                  onRedo={() => void redoMessage(message.id, message.content)}
+                />
               ) : (
                 <AssistantMessage content={message.content} key={message.id} />
               )
             )}
             {loading && (
               <AssistantMessage
-                content={streamChat}
-                streaming={planStreaming}
                 buildEvents={buildEvents}
-                building={isBuilding}
+                content={streamChat}
+                phase={streamPhase}
+                streaming={streamPhase === "planning"}
               />
             )}
             <div ref={bottomRef} />
@@ -655,8 +756,17 @@ export default function AppWorkspace() {
                   {hasDatabase ? " · database" : ""}
                 </span>
                 <button className="btn" type="submit" disabled={loading || !input.trim()}>
-                  {loading ? (isBuilding ? "Building files…" : "Planning…") : "Send"}
-                  <ArrowUp size={14} />
+                  {loading ? (
+                    <>
+                      <Loader2 size={14} className="chip-spinner" />
+                      {streamPhase === "building" ? "Building…" : "Thinking…"}
+                    </>
+                  ) : (
+                    <>
+                      Send
+                      <ArrowUp size={14} />
+                    </>
+                  )}
                 </button>
               </div>
             </div>

@@ -61,18 +61,23 @@ Rules live in \`database.rules.json\` and define table names + field types. When
 const PLAN_PROMPT = `${BASE_SYSTEM}
 
 ## Planning phase — chat only
-The user wants changes. Reply in plain language the user will read in chat:
-1. A short summary (2–4 sentences) of what you'll do.
-2. Bullet lists:
-   - **Create / edit:** file paths (or "none")
-   - **Delete:** file paths (or "none")
+Reply like a helpful assistant in a product UI. The user sees ONLY your natural-language reply — no file lists, no bullet plans, no markdown headings, no code fences in the visible text.
 
-Do NOT paste file contents. Do NOT use code fences except the hidden machine block below.
+Write 1–2 short sentences:
+- Acknowledge what they asked for in plain language.
+- Say you'll start working on it right away (when code changes are needed).
 
-End with exactly one fenced block (this JSON is hidden from the user):
+Examples of good replies:
+- "Sure — I'll build an employee, asset, and onboarding manager with a database and AI chat. Starting now."
+- "Got it. I'll add dark mode to the app."
+- "Here's how window.db works in your app: …" (when they only ask a question)
+
+Do NOT mention file paths, \`build_plan\`, JSON, or implementation steps in the visible reply.
+
+When code changes ARE needed, end your reply with exactly one hidden machine block (never describe this block to the user):
 
 \`\`\`build_plan
-{"summary":"…","upsert":["index.html"],"delete":[]}
+{"summary":"internal one-line plan","upsert":["index.html"],"delete":[]}
 \`\`\`
 
 If the user only asks a question with no code changes, answer normally and omit the build_plan block.`;
@@ -126,42 +131,56 @@ export function extractFileOperations(text: string) {
   return operations.filter((op) => op.path && safePath(op.path));
 }
 
+/** Strip hidden plan blocks and any trailing partial fences while streaming. */
+export function stripVisiblePlanText(text: string) {
+  let result = text.replace(/```build_plan\s*[\s\S]*?```/g, "");
+  result = result.replace(/```build_plan[\s\S]*$/g, "");
+  result = result.replace(/```[\s\S]*$/g, "");
+  result = result.replace(/\n\s*[-*]\s*\*\*(Create|Edit|Delete)[^\n]*/gi, "");
+  return result.replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
 export function planSummaryText(text: string) {
-  return text.replace(/```build_plan\s*[\s\S]*?```/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  return stripVisiblePlanText(text).trim();
 }
 
-export function formatPlanActions(plan: BuildPlan) {
-  const lines: string[] = [];
-  const upsert = plan.upsert?.filter(Boolean) ?? [];
-  const del = plan.delete?.filter(Boolean) ?? [];
-  if (upsert.length) lines.push(`Create / edit: ${upsert.join(", ")}`);
-  if (del.length) lines.push(`Delete: ${del.join(", ")}`);
-  return lines.join("\n");
-}
-
-/** User-visible plan text — strips hidden JSON, adds parsed actions when ready. */
+/** User-visible plan text — conversational only, no file lists. */
 export function visiblePlanText(raw: string) {
-  const prose = planSummaryText(raw);
-  const plan = extractBuildPlan(raw);
-  if (!plan) return prose;
-  const actions = formatPlanActions(plan);
-  if (!actions) return prose;
-  if (prose.includes(actions.split("\n")[0] ?? "")) return prose;
-  return [prose, actions].filter(Boolean).join("\n\n");
+  return planSummaryText(raw);
+}
+
+export type StoredFileOperation = {
+  action: "upsert" | "delete";
+  path: string;
+  status: "done" | "deleted" | "error";
+  error?: string;
+};
+
+export function formatFileOperationsBlock(ops: StoredFileOperation[]) {
+  if (!ops.length) return "";
+  return `\n\n\`\`\`file_operation\n${JSON.stringify(ops)}\n\`\`\``;
 }
 
 export function formatAssistantReply(
   planText: string,
   results?: { deleted: string[]; updated: string[]; failed: string[] }
 ) {
-  const visible = visiblePlanText(planText);
+  const visible = planSummaryText(planText);
   if (!results) return visible;
-  const footer: string[] = [];
-  if (results.deleted.length) footer.push(`Removed: ${results.deleted.join(", ")}`);
-  if (results.updated.length) footer.push(`Updated: ${results.updated.join(", ")}`);
-  if (results.failed.length) footer.push(`Failed: ${results.failed.join(", ")}`);
-  if (!footer.length) return visible;
-  return [visible, footer.join("\n")].filter(Boolean).join("\n\n");
+
+  const ops: StoredFileOperation[] = [
+    ...results.deleted.map(
+      (path): StoredFileOperation => ({ action: "delete", path, status: "deleted" })
+    ),
+    ...results.updated.map(
+      (path): StoredFileOperation => ({ action: "upsert", path, status: "done" })
+    ),
+    ...results.failed.map(
+      (path): StoredFileOperation => ({ action: "upsert", path, status: "error" })
+    ),
+  ];
+
+  return `${visible}${formatFileOperationsBlock(ops)}`;
 }
 
 type ChatMessage = { role: string; content: string };
@@ -272,7 +291,7 @@ export async function generatePlan(
     buildContextMessages(files, history, PLAN_PROMPT),
     (delta) => {
       raw += delta;
-      const visible = visiblePlanText(raw);
+      const visible = stripVisiblePlanText(raw);
       const chunk = visible.slice(lastVisible.length);
       if (chunk) onVisibleDelta(chunk);
       lastVisible = visible;

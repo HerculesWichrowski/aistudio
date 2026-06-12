@@ -21,7 +21,7 @@ import {
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  const { projectId, content } = await req.json();
+  const { projectId, content, skipUserInsert } = await req.json();
 
   if (!projectId || !content?.trim()) {
     return new Response("Missing projectId or content", { status: 400 });
@@ -31,7 +31,9 @@ export async function POST(req: NextRequest) {
   if (!result.ok) return result.response;
   const { project } = result;
 
-  await addMessage(projectId, "user", content.trim());
+  if (!skipUserInsert) {
+    await addMessage(projectId, "user", content.trim());
+  }
 
   const messages = await listMessages(projectId);
   const files = (await listFiles(projectId)) as unknown as { path: string; content: string }[];
@@ -68,6 +70,10 @@ export async function POST(req: NextRequest) {
         const sessionPaths = new Set<string>();
         let currentFiles = files;
 
+        for (const path of [...deletePaths, ...upsertPaths]) {
+          send(emitEvent({ type: "file", status: "start", path }));
+        }
+
         for (const path of deletePaths) {
           await deleteFile(projectId, path);
           send(emitEvent({ type: "file", status: "deleted", path }));
@@ -77,7 +83,6 @@ export async function POST(req: NextRequest) {
         const fileResults: { path: string; ok: boolean }[] = [];
 
         for (const path of upsertPaths) {
-          send(emitEvent({ type: "file", status: "start", path }));
           const heartbeat = setInterval(() => {
             send(emitEvent({ type: "heartbeat", path }));
           }, 8000);

@@ -126,7 +126,6 @@ export default function Home() {
       </header>
 
       <main className="home-main">
-        <p className="home-badge">AI Partner for Business</p>
         <h1 className="home-title">Chat apps into existence.</h1>
         <p className="home-sub">
           Describe an app, watch it build itself, then share it with a link.

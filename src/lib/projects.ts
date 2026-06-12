@@ -94,6 +94,33 @@ export async function addMessage(projectId: string, role: string, content: strin
   return { id, role, content };
 }
 
+export async function truncateMessagesFrom(
+  projectId: string,
+  messageId: string,
+  includeMessage = false
+) {
+  const anchor = await turso(
+    "SELECT created_at, id FROM messages WHERE id = ? AND project_id = ?",
+    [messageId, projectId]
+  );
+  const row = anchor.rows?.[0] as unknown as { created_at: number; id: string } | undefined;
+  if (!row) return 0;
+
+  const result = await turso(
+    includeMessage
+      ? `DELETE FROM messages
+         WHERE project_id = ?
+           AND (created_at > ? OR (created_at = ? AND id >= ?))`
+      : `DELETE FROM messages
+         WHERE project_id = ?
+           AND (created_at > ? OR (created_at = ? AND id > ?))`,
+    [projectId, row.created_at, row.created_at, row.id]
+  );
+
+  await turso("UPDATE projects SET updated_at = unixepoch() WHERE id = ?", [projectId]);
+  return result.rows?.length ?? 0;
+}
+
 export async function listFiles(projectId: string) {
   const r = await turso(
     "SELECT * FROM files WHERE project_id = ? ORDER BY path ASC",
