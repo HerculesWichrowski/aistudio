@@ -1,6 +1,19 @@
 type VirtualFile = { path: string; content: string };
 
-const ENTRY_FILES = ["index.html", "styles.css", "app.js", "database.rules.json"];
+const ROOT_ENTRY_FILES = ["index.html", "styles.css", "app.js", "database.rules.json"];
+
+function collectEntryPaths(files: VirtualFile[]) {
+  const paths = new Set(ROOT_ENTRY_FILES.filter((path) => files.some((file) => file.path === path)));
+  for (const file of files) {
+    if (
+      (file.path.startsWith("components/") || file.path.startsWith("lib/")) &&
+      file.path.endsWith(".js")
+    ) {
+      paths.add(file.path);
+    }
+  }
+  return [...paths];
+}
 
 export type ContextSelection = {
   structure: string;
@@ -32,7 +45,7 @@ export function selectFileContext(
   const structure = buildFileStructure(files);
 
   const wanted = new Set<string>();
-  for (const path of ENTRY_FILES) {
+  for (const path of collectEntryPaths(files)) {
     if (byPath.has(path)) wanted.add(path);
   }
   for (const path of options.planPaths ?? []) {

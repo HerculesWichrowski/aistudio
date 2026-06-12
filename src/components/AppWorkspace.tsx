@@ -1227,7 +1227,7 @@ export default function AppWorkspace() {
             <h2>OpenRouter settings</h2>
             <p className="muted" style={{ fontSize: 13, lineHeight: 1.5 }}>
               Without your own key, you can use the free auto router or pick any free model from OpenRouter.
-              Add a project API key to unlock paid models, Auto (smart routing), and custom model IDs.
+              Add a project API key to unlock paid models, Auto, and custom model IDs.
             </p>
             <div>
               <label className="label" htmlFor="api-key">

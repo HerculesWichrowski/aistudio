@@ -4,8 +4,8 @@ export const AUTO_ROUTER = "openrouter/auto";
 export const FREE_ROUTER = "openrouter/free";
 
 export const ROUTERS = [
-  { id: AUTO_ROUTER, name: "Auto (smart routing)" },
-  { id: FREE_ROUTER, name: "Free (auto free models)" },
+  { id: AUTO_ROUTER, name: "Auto" },
+  { id: FREE_ROUTER, name: "Auto" },
 ] as const;
 
 type OpenRouterModel = {
@@ -95,8 +95,8 @@ export async function listModelOptions(
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const routerOptions: ModelOption[] = fullAccess
-    ? ROUTERS.map((router) => ({ id: router.id, name: router.name, free: router.id === FREE_ROUTER }))
-    : [{ id: FREE_ROUTER, name: "Free (auto free models)", free: true }];
+    ? [{ id: AUTO_ROUTER, name: "Auto", free: false }]
+    : [{ id: FREE_ROUTER, name: "Auto", free: true }];
 
   const seen = new Set<string>();
   const merged: ModelOption[] = [];

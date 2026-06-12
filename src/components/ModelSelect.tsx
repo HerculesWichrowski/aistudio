@@ -13,7 +13,7 @@ type ModelSelectProps = {
 };
 
 function modelLabel(model: ModelOption) {
-  return `${model.name}${model.free ? " · free" : ""}`;
+  return model.name;
 }
 
 export default function ModelSelect({

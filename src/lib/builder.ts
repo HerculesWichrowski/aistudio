@@ -20,27 +20,77 @@ export function emitEvent(payload: Record<string, unknown>) {
   return `${BUILD_EVENT_PREFIX}${JSON.stringify(payload)}\n`;
 }
 
-/** Prefer smaller/support files first; app.js last (largest, depends on others). */
-const GENERATION_ORDER = ["database.rules.json", "index.html", "styles.css", "app.js"];
+/** Prefer dependencies first; index.html last so it references everything. */
+const GENERATION_ORDER = [
+  "database.rules.json",
+  "styles.css",
+  "app.js",
+  "index.html",
+];
+
+function generationRank(path: string) {
+  if (path === "database.rules.json") return 0;
+  if (path.startsWith("lib/")) return 1;
+  if (path.startsWith("components/")) return 2;
+  if (path === "styles.css") return 3;
+  if (path === "app.js") return 4;
+  if (path === "index.html") return 5;
+  const index = GENERATION_ORDER.indexOf(path);
+  return index === -1 ? GENERATION_ORDER.length : index;
+}
 
 export function sortGenerationPaths(paths: string[]) {
-  const rank = (path: string) => {
-    const index = GENERATION_ORDER.indexOf(path);
-    return index === -1 ? GENERATION_ORDER.length : index;
-  };
   return [...new Set(paths.filter(Boolean))].sort(
-    (a, b) => rank(a) - rank(b) || a.localeCompare(b)
+    (a, b) => generationRank(a) - generationRank(b) || a.localeCompare(b)
   );
 }
 
 const BASE_SYSTEM = `You are the app builder inside aistudio, a chat-to-app product. The user describes an app; you build and maintain it as a small set of files that run directly in the browser.
 
 ## Runtime — this is critical
-The app is served as ONE self-contained HTML document inside a sandboxed page. There is NO bundler, NO npm, NO server, NO Next.js. What works:
-- index.html is the entry point. Always create it.
-- You may split out styles.css and app.js; they are inlined automatically when referenced via <link rel="stylesheet" href="styles.css"> and <script src="app.js">. Never reference local files any other way.
-- CDN libraries are allowed via https URLs. Prefer plain HTML/CSS/JS unless the app genuinely benefits from a library.
+The app is served as ONE self-contained HTML document inside a sandboxed page. There is NO bundler, NO npm install step, NO server, NO Next.js. What works:
+- \`index.html\` is the entry shell. Always create it.
+- ES modules via \`<script type="module" src="app.js">\` plus an \`<script type="importmap">\` for CDN packages.
+- Local modules use the \`@app/\` prefix: \`import '@app/components/chat-app.js'\` (never \`./\` relative paths).
+- CSS via \`<link rel="stylesheet" href="styles.css">\` (inlined automatically). Component styling belongs in Lit \`static styles\`.
+- CDN packages via esm.sh in the import map, then bare imports in JS (\`from 'lit'\`, \`from 'date-fns'\`).
 - localStorage/sessionStorage exist but are NOT persistent across reloads. Keep state in memory unless using the built-in database.
+
+## Architecture — components first (required)
+Build with **Web Components + CDN packages**. Avoid monolithic plain HTML/CSS/JS and huge single files.
+
+**Layout:**
+- \`index.html\` — thin shell: charset/viewport, import map, styles.css link, custom element tags in body, one module entry. No big inline scripts or hand-written markup trees.
+- \`app.js\` — bootstrap only (~15–40 lines): import/register components. No UI logic here.
+- \`components/*.js\` — one Lit component per file. Export the class and call \`customElements.define(...)\` at the bottom.
+- \`lib/*.js\` — tiny shared helpers (formatters, API wrappers) when reused across components.
+- \`styles.css\` — CSS variables, reset, page background/fonts only.
+
+**Lit component pattern (default for all UI):**
+\`\`\`javascript
+import { LitElement, html, css } from 'lit';
+
+export class ChatMessage extends LitElement {
+  static properties = { text: { type: String } };
+  static styles = css\`:host { display: block; } .bubble { padding: 10px; border-radius: 12px; }\`;
+  render() { return html\`<div class="bubble">\${this.text}</div>\`; }
+}
+customElements.define('chat-message', ChatMessage);
+\`\`\`
+
+**Default import map** (extend when you add packages — one entry per package):
+\`\`\`json
+{
+  "imports": {
+    "lit": "https://esm.sh/lit@3.3.1",
+    "lit/decorators.js": "https://esm.sh/lit@3.3.1/decorators.js",
+    "date-fns": "https://esm.sh/date-fns@4.1.0",
+    "nanoid": "https://esm.sh/nanoid@5.1.5"
+  }
+}
+\`\`\`
+
+**Smart reuse:** split screens into composable custom elements (\`<chat-thread>\`, \`<todo-list>\`, \`<app-shell>\`). Use properties + \`@event\` listeners instead of \`document.querySelector\`. Prefer Lit + small npm packages over hand-rolled DOM/CSS.
 
 ## Built-in AI — window.ai
 - \`await window.ai.chat("prompt")\` → string reply
@@ -72,6 +122,7 @@ When the user asks for a database, create that file and wire the UI to window.db
 
 ## Quality bar
 - Ship complete, working features. No TODOs, no placeholder screens.
+- Many small focused files beat one large file. Less total code through reuse.
 - Modern, clean, responsive UI with sensible spacing and typography.`;
 
 const PLAN_PROMPT = `${BASE_SYSTEM}
@@ -93,15 +144,17 @@ Do NOT mention file paths, \`build_plan\`, JSON, or implementation steps in the 
 When code changes ARE needed, end your reply with exactly one hidden machine block (never describe this block to the user):
 
 \`\`\`build_plan
-{"summary":"internal one-line plan","upsert":["index.html"],"delete":[]}
+{"summary":"internal one-line plan","upsert":["index.html","styles.css","app.js","components/app-shell.js"],"delete":[]}
 \`\`\`
 
 ## Follow-up edits — always emit build_plan
 If the project already has files and the user asks to change, update, fix, add, restyle, or improve anything, you MUST include build_plan with every file that needs to change:
-- CSS / colors / theme / fonts / layout → \`styles.css\` if it exists, otherwise \`index.html\` (when styles are inline)
-- UI structure / HTML → \`index.html\`
-- Behavior / logic / features → \`app.js\` (and \`index.html\` if markup changes too)
-- Database / tables / fields → \`database.rules.json\` plus any files that use the data
+- Theme / tokens / page background → \`styles.css\`
+- A specific UI piece → the relevant \`components/*.js\` file (create a new component file when it improves reuse)
+- App wiring / bootstrap → \`app.js\`
+- Shell / import map / new CDN package → \`index.html\`
+- Database / tables / fields → \`database.rules.json\` plus components that use the data
+- Shared logic used in multiple places → \`lib/*.js\`
 
 Never say you will update the app without also emitting build_plan. Acknowledging the request in chat is not enough — the block is required for files to change.
 
@@ -119,6 +172,9 @@ Generate ONE file. Output exactly one fenced block with the raw file content (no
 Rules:
 - Include the FULL file content. Paths are relative. Never use .. or dotfiles.
 - Do NOT wrap content in JSON. Put the file verbatim inside the fence.
+- For \`components/*.js\`: one Lit web component per file, \`@app/\` imports for local deps.
+- For \`app.js\`: imports only — no large UI implementations.
+- For \`index.html\`: import map + module entry + custom element tags, minimal markup.
 - No prose outside the fence.`;
 
 export function extractBuildPlan(text: string): BuildPlan | null {
@@ -221,9 +277,23 @@ function hasFile(files: VirtualFile[], path: string) {
 
 function cssTargetPath(files: VirtualFile[]) {
   if (hasFile(files, "styles.css")) return "styles.css";
-  const html = files.find((file) => file.path === "index.html");
-  if (html) return "index.html";
   return "styles.css";
+}
+
+function componentTargets(files: VirtualFile[], message: string) {
+  const existing = files
+    .filter((file) => file.path.startsWith("components/") && file.path.endsWith(".js"))
+    .map((file) => file.path);
+
+  if (existing.length === 1) return existing;
+  if (existing.length === 0) return ["components/app-shell.js"];
+
+  const lower = message.toLowerCase();
+  const matched = existing.filter((path) => {
+    const slug = path.replace(/^components\//, "").replace(/\.js$/, "").replace(/[-_]/g, " ");
+    return slug.split(" ").some((word) => word.length > 3 && lower.includes(word));
+  });
+  return matched.length > 0 ? matched : existing.slice(0, 2);
 }
 
 /** Guess which files to regenerate when the model forgets build_plan. */
@@ -231,6 +301,10 @@ export function inferEditPaths(message: string, files: VirtualFile[]) {
   const paths = new Set<string>();
 
   if (STYLE_KEYWORDS.test(message)) paths.add(cssTargetPath(files));
+  if (HTML_KEYWORDS.test(message) || JS_KEYWORDS.test(message)) {
+    for (const path of componentTargets(files, message)) paths.add(path);
+    if (hasFile(files, "app.js")) paths.add("app.js");
+  }
   if (JS_KEYWORDS.test(message) && hasFile(files, "app.js")) paths.add("app.js");
   if (HTML_KEYWORDS.test(message) && hasFile(files, "index.html")) paths.add("index.html");
   if (DB_KEYWORDS.test(message) && hasFile(files, "database.rules.json")) {
@@ -239,11 +313,14 @@ export function inferEditPaths(message: string, files: VirtualFile[]) {
 
   if (paths.size > 0) return [...paths];
 
-  if (files.length === 0) return ["index.html", "styles.css", "app.js"];
+  if (files.length === 0) {
+    return ["index.html", "styles.css", "app.js", "components/app-shell.js"];
+  }
 
   for (const path of ["index.html", "styles.css", "app.js", "database.rules.json"]) {
     if (hasFile(files, path)) paths.add(path);
   }
+  for (const path of componentTargets(files, message)) paths.add(path);
 
   return [...paths];
 }
@@ -262,10 +339,10 @@ const PLAN_REPAIR_PROMPT = `${BASE_SYSTEM}
 
 Output ONLY one build_plan block — no visible chat text.
 List every project file path that must be created or updated for the user's latest request.
-Use paths exactly as they appear in the project structure (e.g. styles.css, index.html, app.js).
+Use paths like \`components/chat-app.js\`, \`app.js\`, \`index.html\`, \`styles.css\`.
 
 \`\`\`build_plan
-{"summary":"internal one-line plan","upsert":["styles.css"],"delete":[]}
+{"summary":"internal one-line plan","upsert":["components/app-shell.js","app.js","index.html"],"delete":[]}
 \`\`\``;
 
 export async function generatePlanRepair(
@@ -519,6 +596,15 @@ export async function generateFile(
     path === "database.rules.json"
       ? `Use this exact JSON shape with a top-level "tables" key:
 {"tables":{"tableName":{"fields":{"fieldName":{"type":"string","required":true}}}}}`
+      : "",
+    path.startsWith("components/")
+      ? "One Lit web component in this file. Use @app/ imports for local deps. Export the class and customElements.define at the bottom."
+      : "",
+    path === "app.js"
+      ? "Bootstrap only: import/register components via @app/ paths. No UI markup or large logic."
+      : "",
+    path === "index.html"
+      ? "Thin shell: import map (Lit + any npm packages), styles.css, custom element tags, <script type=\"module\" src=\"app.js\">."
       : "",
     `Return the complete file in a single \`\`\`file:${path}\`\`\` block.`,
   ]

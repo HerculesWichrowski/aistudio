@@ -1,3 +1,5 @@
+import { injectModuleLoader } from "./module-compose";
+
 type VirtualFile = { path: string; content: string };
 
 /**
@@ -127,6 +129,7 @@ export function composeApp(files: VirtualFile[], origin: string, projectId: stri
     files.find((file) => file.path.endsWith(".html"));
 
   let html = entry ? inlineLocalAssets(entry.content, files) : EMPTY_APP;
+  html = injectModuleLoader(html, files);
   const runtime = runtimeScript(origin, projectId);
 
   if (/<head[^>]*>/i.test(html)) {

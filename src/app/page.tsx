@@ -170,7 +170,7 @@ export default function Home() {
               models={
                 models.length > 0
                   ? models
-                  : [{ id: selectedModel, name: "Free (auto free models)", free: true }]
+                  : [{ id: selectedModel, name: "Auto", free: true }]
               }
               onChange={setSelectedModel}
               title="Builder model"
