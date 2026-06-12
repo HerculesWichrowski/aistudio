@@ -3,14 +3,30 @@ import { NextRequest } from "next/server";
 import { requireOwnedProject } from "@/lib/auth";
 import { createBuildRun, getActiveBuildRun } from "@/lib/build-runs";
 import { executeBuildRun } from "@/lib/execute-build";
+import { formatUserRequestWithAttachments, type ChatAttachment } from "@/lib/attachments";
 import { addMessage } from "@/lib/projects";
 
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  const { projectId, content, skipUserInsert, contextPaths } = await req.json();
+  const { projectId, content, skipUserInsert, attachments } = await req.json();
 
-  if (!projectId || !content?.trim()) {
+  const safeAttachments: ChatAttachment[] = Array.isArray(attachments)
+    ? attachments
+        .filter(
+          (item: unknown): item is ChatAttachment =>
+            !!item &&
+            typeof item === "object" &&
+            typeof (item as ChatAttachment).name === "string" &&
+            typeof (item as ChatAttachment).content === "string"
+        )
+        .map((item) => ({
+          name: item.name.slice(0, 200),
+          content: item.content.slice(0, 48_000),
+        }))
+    : [];
+
+  if (!projectId || (!content?.trim() && safeAttachments.length === 0)) {
     return new Response("Missing projectId or content", { status: 400 });
   }
 
@@ -24,18 +40,15 @@ export async function POST(req: NextRequest) {
   }
 
   if (!skipUserInsert) {
-    await addMessage(projectId, "user", content.trim());
+    const stored = content?.trim() || `[${safeAttachments.map((file) => file.name).join(", ")}]`;
+    await addMessage(projectId, "user", stored);
   }
 
   const runId = await createBuildRun(projectId);
-  const userRequest = content.trim();
+  const userRequest = formatUserRequestWithAttachments(content ?? "", safeAttachments);
 
   after(async () => {
-    await executeBuildRun(runId, project, userRequest, {
-      contextPaths: Array.isArray(contextPaths)
-        ? contextPaths.filter((path: unknown): path is string => typeof path === "string")
-        : [],
-    });
+    await executeBuildRun(runId, project, userRequest);
   });
 
   return Response.json({ runId });

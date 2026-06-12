@@ -31,7 +31,6 @@ import ShareDialog from "./ShareDialog";
 import PageLoader from "./PageLoader";
 import BrandLogo from "./BrandLogo";
 import { loadProjectRules, type FieldRule } from "@/lib/database";
-import { selectFileContext } from "@/lib/context";
 import { shouldCaptureConsole } from "@/lib/console-filter";
 import {
   parseStoredFileOps,
@@ -70,6 +69,9 @@ type Project = {
 };
 type ConsoleEntry = { id: number; level: string; text: string };
 type AppData = Record<string, Record<string, unknown>[]>;
+type UploadedAttachment = { id: string; name: string; content: string };
+
+const MAX_ATTACHMENT_BYTES = 512_000;
 
 function chipClassForStatus(status: BuildFileStatus["status"] | StoredFileOp["status"]) {
   if (status === "start") return "chip chip-working";
@@ -494,12 +496,11 @@ export default function AppWorkspace() {
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [chatError, setChatError] = useState("");
-  const [attachedPaths, setAttachedPaths] = useState<string[]>([]);
-  const [attachOpen, setAttachOpen] = useState(false);
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [chatWidth, setChatWidth] = useState(400);
   const chatWidthRef = useRef(400);
   const resizingRef = useRef(false);
-  const attachRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const didSendStarter = useRef(false);
@@ -513,15 +514,6 @@ export default function AppWorkspace() {
     [consoleEntries]
   );
 
-  const contextSelection = useMemo(
-    () =>
-      selectFileContext(
-        files.map((file) => ({ path: file.path, content: file.content })),
-        { sessionPaths: attachedPaths }
-      ),
-    [files, attachedPaths]
-  );
-
   useEffect(() => {
     const stored = localStorage.getItem("aistudio:chat-width");
     if (stored) {
@@ -532,15 +524,6 @@ export default function AppWorkspace() {
       }
     }
   }, []);
-
-  useEffect(() => {
-    if (!attachOpen) return;
-    function onPointerDown(event: MouseEvent) {
-      if (!attachRef.current?.contains(event.target as Node)) setAttachOpen(false);
-    }
-    window.addEventListener("mousedown", onPointerDown);
-    return () => window.removeEventListener("mousedown", onPointerDown);
-  }, [attachOpen]);
 
   useEffect(() => {
     function onMove(event: MouseEvent) {
@@ -563,6 +546,40 @@ export default function AppWorkspace() {
       window.removeEventListener("mouseup", onUp);
     };
   }, []);
+
+  async function addUploadedFiles(fileList: FileList | null) {
+    if (!fileList?.length) return;
+
+    const next: UploadedAttachment[] = [];
+    for (const file of Array.from(fileList)) {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setChatError(`${file.name} is too large (max 512KB)`);
+        continue;
+      }
+      try {
+        const content = await readUploadedFile(file);
+        next.push({ id: crypto.randomUUID(), name: file.name, content });
+      } catch {
+        setChatError(`Could not read ${file.name}`);
+      }
+    }
+
+    if (next.length) {
+      setAttachments((current) => [...current, ...next]);
+      setChatError("");
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function readUploadedFile(file: File) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(reader.error);
+      if (file.type.startsWith("image/")) reader.readAsDataURL(file);
+      else reader.readAsText(file);
+    });
+  }
 
   const load = useCallback(async () => {
     const [projectResponse, messagesResponse, filesResponse] = await Promise.all([
@@ -691,10 +708,15 @@ export default function AppWorkspace() {
   const sendMessage = useCallback(
     async (forcedContent?: string, options?: { skipUserInsert?: boolean }) => {
       const content = (forcedContent ?? input).trim();
-      if (!content || loadingRef.current) return;
+      if ((!content && attachments.length === 0) || loadingRef.current) return;
 
       loadingRef.current = true;
       if (!options?.skipUserInsert) setInput("");
+      const outgoingAttachments = attachments.map(({ name, content: fileContent }) => ({
+        name,
+        content: fileContent,
+      }));
+      if (!options?.skipUserInsert) setAttachments([]);
       setLoading(true);
       setStreamChat("");
       setBuildEvents([]);
@@ -704,7 +726,11 @@ export default function AppWorkspace() {
       if (!options?.skipUserInsert) {
         setMessages((current) => [
           ...current,
-          { id: crypto.randomUUID(), role: "user", content },
+          {
+            id: crypto.randomUUID(),
+            role: "user",
+            content: content || `[${outgoingAttachments.map((file) => file.name).join(", ")}]`,
+          },
         ]);
       }
 
@@ -716,7 +742,7 @@ export default function AppWorkspace() {
             projectId: id,
             content,
             skipUserInsert: options?.skipUserInsert === true,
-            contextPaths: attachedPaths,
+            attachments: outgoingAttachments,
           }),
         });
 
@@ -737,7 +763,7 @@ export default function AppWorkspace() {
         setLoading(false);
       }
     },
-    [id, input, followBuildRun, stopFollowingRun, attachedPaths]
+    [id, input, attachments, followBuildRun, stopFollowingRun]
   );
 
   async function editMessage(messageId: string, content: string) {
@@ -894,7 +920,7 @@ export default function AppWorkspace() {
         <span className="ws-title">{project.name}</span>
         <span className="ws-spacer" />
         <select
-          className="select"
+          className="select select-minimal"
           value={project.model}
           onChange={(event) => changeModel(event.target.value)}
           title="Model"
@@ -973,6 +999,26 @@ export default function AppWorkspace() {
             }}
           >
             <div className="composer-box">
+              {attachments.length > 0 && (
+                <div className="composer-attachments">
+                  {attachments.map((file) => (
+                    <span className="upload-attachment" key={file.id}>
+                      <Paperclip size={11} />
+                      {file.name}
+                      <button
+                        className="upload-attachment-remove"
+                        onClick={() =>
+                          setAttachments((current) => current.filter((item) => item.id !== file.id))
+                        }
+                        title="Remove attachment"
+                        type="button"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
               <textarea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
@@ -985,78 +1031,28 @@ export default function AppWorkspace() {
                 placeholder="Add a dark mode toggle, add a database for todos..."
               />
               <div className="composer-foot">
-                <div className="composer-context">
-                  <div className="composer-attach" ref={attachRef}>
-                    <button
-                      className="btn-icon"
-                      onClick={() => setAttachOpen((open) => !open)}
-                      title="Attach files to context"
-                      type="button"
-                    >
-                      <Paperclip size={14} />
-                    </button>
-                    {attachOpen && (
-                      <div className="attach-menu">
-                        {files.length === 0 ? (
-                          <div className="attach-empty muted">No files yet</div>
-                        ) : (
-                          files.map((file) => {
-                            const attached = attachedPaths.includes(file.path);
-                            const inContext = contextSelection.includedPaths.includes(file.path);
-                            return (
-                              <button
-                                className={`attach-item ${attached ? "active" : ""}`}
-                                key={file.id}
-                                onClick={() =>
-                                  setAttachedPaths((current) =>
-                                    attached
-                                      ? current.filter((path) => path !== file.path)
-                                      : [...current, file.path]
-                                  )
-                                }
-                                type="button"
-                              >
-                                <FileCode size={12} />
-                                <span>{file.path}</span>
-                                {inContext && !attached ? (
-                                  <span className="attach-tag">auto</span>
-                                ) : null}
-                                {attached ? <span className="attach-tag">attached</span> : null}
-                              </button>
-                            );
-                          })
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="context-chips">
-                    {contextSelection.includedPaths.length === 0 ? (
-                      <span className="muted" style={{ fontSize: 12 }}>
-                        No context loaded
-                      </span>
-                    ) : (
-                      contextSelection.includedPaths.map((path) => (
-                        <span className="context-chip" key={path} title="Included in builder context">
-                          <FileCode size={11} />
-                          {path}
-                          {attachedPaths.includes(path) ? (
-                            <button
-                              className="context-chip-remove"
-                              onClick={() =>
-                                setAttachedPaths((current) => current.filter((item) => item !== path))
-                              }
-                              title="Remove attachment"
-                              type="button"
-                            >
-                              <X size={10} />
-                            </button>
-                          ) : null}
-                        </span>
-                      ))
-                    )}
-                  </div>
+                <div className="composer-tools">
+                  <input
+                    ref={fileInputRef}
+                    className="composer-file-input"
+                    type="file"
+                    multiple
+                    onChange={(event) => void addUploadedFiles(event.target.files)}
+                  />
+                  <button
+                    className="btn-icon"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Upload files"
+                    type="button"
+                  >
+                    <Paperclip size={14} />
+                  </button>
                 </div>
-                <button className="btn" type="submit" disabled={loading || !input.trim()}>
+                <button
+                  className="btn"
+                  type="submit"
+                  disabled={loading || (!input.trim() && attachments.length === 0)}
+                >
                   {loading ? (
                     <>
                       <Loader2 size={14} className="chip-spinner" />

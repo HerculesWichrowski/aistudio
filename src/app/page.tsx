@@ -165,7 +165,7 @@ export default function Home() {
           />
           <div className="prompt-card-foot">
             <select
-              className="select"
+              className="select select-minimal"
               value={selectedModel}
               onChange={(event) => setSelectedModel(event.target.value)}
               title="Builder model"

@@ -47,12 +47,7 @@ function parseStreamEvent(line: string): BuildRunEvent | null {
   return null;
 }
 
-export async function executeBuildRun(
-  runId: string,
-  project: Project,
-  userRequest: string,
-  options?: { contextPaths?: string[] }
-) {
+export async function executeBuildRun(runId: string, project: Project, userRequest: string) {
   const run = await getBuildRun(runId);
   if (!run || run.status !== "running") return;
 
@@ -98,7 +93,7 @@ export async function executeBuildRun(
       planBuffer += chunk;
       streamChat = stripVisiblePlanText(planBuffer);
       void persist();
-    }, options?.contextPaths ?? []);
+    });
 
     streamChat = stripVisiblePlanText(planRaw);
     await persist();
@@ -121,7 +116,7 @@ export async function executeBuildRun(
 
     const upsertPaths = sortGenerationPaths(plan.upsert ?? []);
     const deletePaths = [...new Set((plan.delete ?? []).filter(Boolean))];
-    const sessionPaths = new Set<string>(options?.contextPaths ?? []);
+    const sessionPaths = new Set<string>();
     let currentFiles = files;
 
     for (const path of [...deletePaths, ...upsertPaths]) {

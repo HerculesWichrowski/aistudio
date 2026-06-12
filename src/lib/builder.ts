@@ -441,15 +441,14 @@ export async function generatePlan(
   project: Project,
   files: VirtualFile[],
   history: ChatMessage[],
-  onVisibleDelta: (visibleChunk: string) => void,
-  sessionPaths: string[] = []
+  onVisibleDelta: (visibleChunk: string) => void
 ) {
   let raw = "";
   let lastVisible = "";
 
   await streamCompletion(
     project,
-    buildContextMessages(files, history, PLAN_PROMPT, { sessionPaths }),
+    buildContextMessages(files, history, PLAN_PROMPT),
     (delta) => {
       raw += delta;
       const visible = stripVisiblePlanText(raw);
