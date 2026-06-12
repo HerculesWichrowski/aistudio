@@ -27,7 +27,9 @@ async function migrate() {
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT DEFAULT '',
-    model TEXT DEFAULT 'openrouter/owl-alpha',
+    model TEXT DEFAULT 'openrouter/free',
+    app_data TEXT DEFAULT '{}',
+    openrouter_api_key TEXT DEFAULT '',
     user_id TEXT DEFAULT '',
     visibility TEXT DEFAULT 'private',
     shared_emails TEXT DEFAULT '',
@@ -56,6 +58,8 @@ async function migrate() {
     "user_id TEXT DEFAULT ''",
     "visibility TEXT DEFAULT 'private'",
     "shared_emails TEXT DEFAULT ''",
+    "app_data TEXT DEFAULT '{}'",
+    "openrouter_api_key TEXT DEFAULT ''",
   ]) {
     try {
       await turso(`ALTER TABLE projects ADD COLUMN ${column}`);

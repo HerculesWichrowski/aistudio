@@ -1,9 +1,8 @@
 import { NextRequest } from "next/server";
 import { initDB } from "@/lib/db";
-import { getProject, DEFAULT_MODEL } from "@/lib/projects";
+import { getProject } from "@/lib/projects";
+import { openRouterHeaders, resolveModel } from "@/lib/openrouter";
 
-// Called by generated apps (window.ai.chat) from a sandboxed opaque origin,
-// so it must be public and CORS-open. It only ever uses the platform key.
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -16,11 +15,6 @@ export function OPTIONS() {
 
 export async function POST(req: NextRequest) {
   await initDB();
-
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    return new Response("AI is not configured on this server", { status: 500, headers: CORS_HEADERS });
-  }
 
   let body: { projectId?: string; messages?: unknown; json?: boolean };
   try {
@@ -55,12 +49,9 @@ export async function POST(req: NextRequest) {
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
+    headers: openRouterHeaders(project),
     body: JSON.stringify({
-      model: project.model || DEFAULT_MODEL,
+      model: await resolveModel(project.model, project),
       messages: sanitized,
       max_tokens: 4096,
       ...(json ? { response_format: { type: "json_object" } } : {}),
@@ -68,7 +59,11 @@ export async function POST(req: NextRequest) {
   });
 
   if (!response.ok) {
-    return new Response("Upstream AI error", { status: 502, headers: CORS_HEADERS });
+    const detail = await response.text().catch(() => "");
+    return new Response(detail || response.statusText, {
+      status: response.status,
+      headers: CORS_HEADERS,
+    });
   }
 
   const data = await response.json();

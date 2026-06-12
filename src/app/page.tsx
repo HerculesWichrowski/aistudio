@@ -1,9 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Show, SignInButton, UserButton, useUser } from "@clerk/nextjs";
+import { Show, SignInButton, UserButton, useClerk, useUser } from "@clerk/nextjs";
 import { ArrowUp, Globe, Link2, Trash2 } from "lucide-react";
+import { stashPendingPrompt, takePendingPrompt } from "@/lib/pending-prompt";
+import BrandLogo from "@/components/BrandLogo";
 
 type Project = {
   id: string;
@@ -27,38 +29,78 @@ function timeAgo(unix: number) {
 
 export default function Home() {
   const router = useRouter();
-  const { isSignedIn } = useUser();
+  const { openSignIn } = useClerk();
+  const { isSignedIn, isLoaded } = useUser();
   const [projects, setProjects] = useState<Project[]>([]);
   const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loadingProjects, setLoadingProjects] = useState(false);
   const [creating, setCreating] = useState(false);
+  const pendingHandled = useRef(false);
+
+  const createProject = useCallback(
+    async (rawPrompt: string) => {
+      const trimmed = rawPrompt.trim();
+      if (!trimmed) return false;
+
+      setCreating(true);
+      try {
+        const response = await fetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: nameFromPrompt(trimmed),
+            description: trimmed.slice(0, 180),
+          }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const project = await response.json();
+        router.push(`/projects/${project.id}?prompt=${encodeURIComponent(trimmed)}`);
+        return true;
+      } catch {
+        setCreating(false);
+        return false;
+      }
+    },
+    [router]
+  );
 
   useEffect(() => {
-    if (!isSignedIn) return;
+    if (!isLoaded) return;
+
+    if (!isSignedIn) {
+      setLoadingProjects(false);
+      return;
+    }
+
+    if (pendingHandled.current) return;
+
+    const pending = takePendingPrompt();
+    if (pending) {
+      pendingHandled.current = true;
+      setPrompt(pending);
+      void createProject(pending);
+      return;
+    }
+
+    setLoadingProjects(true);
     fetch("/api/projects")
       .then((response) => (response.ok ? response.json() : []))
       .then(setProjects)
-      .finally(() => setLoading(false));
-  }, [isSignedIn]);
+      .finally(() => setLoadingProjects(false));
+  }, [isLoaded, isSignedIn, createProject]);
 
-  async function createProject(event?: FormEvent) {
+  async function onSubmit(event?: FormEvent) {
     event?.preventDefault();
     const trimmed = prompt.trim();
     if (!trimmed || creating) return;
 
-    setCreating(true);
-    try {
-      const response = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: nameFromPrompt(trimmed), description: trimmed.slice(0, 180) }),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const project = await response.json();
-      router.push(`/projects/${project.id}?prompt=${encodeURIComponent(trimmed)}`);
-    } catch {
-      setCreating(false);
+    if (!isSignedIn) {
+      stashPendingPrompt(trimmed);
+      openSignIn({});
+      return;
     }
+
+    await createProject(trimmed);
   }
 
   async function deleteProject(id: string) {
@@ -70,14 +112,11 @@ export default function Home() {
   return (
     <div className="home">
       <header className="topbar">
-        <a className="brand" href="/">
-          <span className="brand-mark">ai</span>
-          aistudio
-        </a>
+        <BrandLogo size="sm" href="/" />
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <Show when="signed-out">
             <SignInButton mode="modal">
-              <button className="btn">Sign in</button>
+              <button className="btn-ghost">Sign in</button>
             </SignInButton>
           </Show>
           <Show when="signed-in">
@@ -86,72 +125,55 @@ export default function Home() {
         </div>
       </header>
 
-      <Show when="signed-out">
-        <main className="home-main">
-          <div className="hero-signin">
-            <div>
-              <h1 className="home-title">Chat apps into existence.</h1>
-              <p className="home-sub">
-                Describe an app, watch it build itself, then share it with a link.
-                AI included — apps you make can use AI too, no keys needed.
-              </p>
-            </div>
-            <SignInButton mode="modal">
-              <button className="btn" style={{ minHeight: 38, padding: "0 18px" }}>
-                Get started
-              </button>
-            </SignInButton>
+      <main className="home-main">
+        <p className="home-badge">AI Partner for Business</p>
+        <h1 className="home-title">Chat apps into existence.</h1>
+        <p className="home-sub">
+          Describe an app, watch it build itself, then share it with a link.
+          AI included — apps you make can use AI too.
+        </p>
+
+        <form className="prompt-card" onSubmit={onSubmit}>
+          <textarea
+            value={prompt}
+            autoFocus
+            onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void onSubmit();
+              }
+            }}
+            placeholder="A flashcard trainer that uses AI to generate cards from any topic I type in..."
+          />
+          <div className="prompt-card-foot">
+            <span className="muted" style={{ fontSize: 12 }}>
+              {isSignedIn
+                ? "Enter to create · Shift+Enter for newline"
+                : "Enter to build · you'll sign in first"}
+            </span>
+            <button className="btn" type="submit" disabled={creating || !prompt.trim()}>
+              {creating ? "Creating…" : "Build"}
+              <ArrowUp size={14} />
+            </button>
           </div>
-        </main>
-      </Show>
+        </form>
 
-      <Show when="signed-in">
-        <main className="home-main">
-          <h1 className="home-title">What should we build?</h1>
-          <p className="home-sub">Describe the app. You can refine it in chat afterwards.</p>
-
-          <form className="prompt-card" onSubmit={createProject}>
-            <textarea
-              value={prompt}
-              autoFocus
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void createProject();
-                }
-              }}
-              placeholder="A flashcard trainer that uses AI to generate cards from any topic I type in..."
-            />
-            <div className="prompt-card-foot">
-              <span className="muted" style={{ fontSize: 12 }}>
-                Enter to create · Shift+Enter for newline
-              </span>
-              <button className="btn" type="submit" disabled={creating || !prompt.trim()}>
-                {creating ? "Creating…" : "Build"}
-                <ArrowUp size={14} />
-              </button>
+        {isSignedIn && !loadingProjects && projects.length > 0 && (
+          <section className="apps-section" aria-label="Your apps">
+            <div className="section-head">
+              <h2>Your apps</h2>
+              <span className="muted">{projects.length}</span>
             </div>
-          </form>
 
-          <div className="section-head">
-            <h2>Your apps</h2>
-            {projects.length > 0 && <span className="muted">{projects.length}</span>}
-          </div>
-
-          {loading ? (
-            <div className="empty">Loading…</div>
-          ) : projects.length === 0 ? (
-            <div className="empty">No apps yet. Describe one above to get started.</div>
-          ) : (
             <div className="project-grid">
-              {projects.map((project) => (
+              {projects.map((project, index) => (
                 <div
                   className="project-card"
                   key={project.id}
                   role="button"
                   tabIndex={0}
-                  style={{ cursor: "pointer" }}
+                  style={{ cursor: "pointer", animationDelay: `${(index + 1) * 50}ms` }}
                   onClick={() => router.push(`/projects/${project.id}`)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") router.push(`/projects/${project.id}`);
@@ -190,9 +212,11 @@ export default function Home() {
                 </div>
               ))}
             </div>
-          )}
-        </main>
-      </Show>
+          </section>
+        )}
+      </main>
+
+      <div className="home-accent-bar" aria-hidden />
     </div>
   );
 }

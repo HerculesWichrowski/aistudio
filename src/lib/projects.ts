@@ -11,11 +11,13 @@ export type Project = {
   user_id: string;
   visibility: Visibility;
   shared_emails: string;
+  app_data: string;
+  openrouter_api_key: string;
   created_at: number;
   updated_at: number;
 };
 
-export const DEFAULT_MODEL = "openrouter/owl-alpha";
+export const DEFAULT_MODEL = "openrouter/free";
 
 export function safePath(path: string) {
   return (
@@ -51,7 +53,15 @@ export async function createProject(userId: string, name: string, description = 
 }
 
 export async function updateProject(id: string, fields: Record<string, string>) {
-  const allowed = ["name", "description", "model", "visibility", "shared_emails"];
+  const allowed = [
+    "name",
+    "description",
+    "model",
+    "visibility",
+    "shared_emails",
+    "openrouter_api_key",
+    "app_data",
+  ];
   const entries = Object.entries(fields).filter(([key]) => allowed.includes(key));
   if (entries.length === 0) return;
 

@@ -6,8 +6,8 @@ import { composeApp } from "@/lib/compose";
 
 const DENIED_PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Not available</title>
-<style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#0a0a0a;color:#ededed;font:15px ui-sans-serif,system-ui}div{text-align:center;color:#8a8a8a}a{color:#ededed}</style>
-</head><body><div><p>This app is private or you don't have access.</p><p><a href="/">Go to aistudio</a></p></div></body></html>`;
+<style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#000;color:#fff;font:15px Inter,ui-sans-serif,system-ui}div{text-align:center;color:#9ca3af}a{color:#8719ff;text-decoration:none}a:hover{text-decoration:underline}</style>
+</head><body><div><p>This app is private or you don't have access.</p><p><a href="/">Go to Emplex AI Studio</a></p></div></body></html>`;
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   await initDB();

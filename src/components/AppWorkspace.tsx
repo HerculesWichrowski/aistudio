@@ -10,20 +10,27 @@ import {
   ChevronDown,
   ChevronUp,
   Code2,
+  Database,
   ExternalLink,
   FileCode,
   FilePlus2,
   Eye,
+  KeyRound,
   RotateCw,
   Save,
+  Settings2,
   Share2,
   Trash2,
   Wrench,
 } from "lucide-react";
 import ShareDialog from "./ShareDialog";
+import PageLoader from "./PageLoader";
+import BrandLogo from "./BrandLogo";
+import { parseBuilderStream, type BuildFileStatus } from "@/lib/build-stream-client";
 
 type Message = { id: string; role: string; content: string };
 type ProjectFile = { id: string; path: string; content: string };
+type ModelOption = { id: string; name: string; free: boolean };
 type Project = {
   id: string;
   name: string;
@@ -31,20 +38,19 @@ type Project = {
   model: string;
   visibility: string;
   shared_emails: string;
+  openrouter_api_key: string;
+  ai: {
+    canUseAi: boolean;
+    hasProjectKey: boolean;
+    defaultModel: string;
+    models: ModelOption[];
+  };
 };
 type ConsoleEntry = { id: number; level: string; text: string };
-
-const MODELS = [
-  "openrouter/owl-alpha",
-  "anthropic/claude-sonnet-4.5",
-  "openai/gpt-5.1",
-  "google/gemini-2.5-flash",
-  "x-ai/grok-code-fast-1",
-];
+type AppData = Record<string, Record<string, unknown>[]>;
 
 const FILE_OP_REGEX = /```file_operation\s*([\s\S]*?)```/g;
 
-/** Splits an assistant message into prose + the file paths it changed. */
 function parseAssistantMessage(content: string) {
   const paths: string[] = [];
   let text = content.replace(FILE_OP_REGEX, (_match, body: string) => {
@@ -57,7 +63,6 @@ function parseAssistantMessage(content: string) {
     return "";
   });
 
-  // An unterminated block means files are still being written (streaming).
   let working = false;
   const open = text.indexOf("```file_operation");
   if (open !== -1) {
@@ -68,28 +73,193 @@ function parseAssistantMessage(content: string) {
   return { text: text.replace(/\n{3,}/g, "\n\n").trim(), paths, working };
 }
 
-function AssistantMessage({ content, streaming }: { content: string; streaming?: boolean }) {
-  const { text, paths, working } = useMemo(() => parseAssistantMessage(content), [content]);
+function AssistantMessage({
+  content,
+  streaming,
+  buildEvents = [],
+  building,
+}: {
+  content: string;
+  streaming?: boolean;
+  buildEvents?: BuildFileStatus[];
+  building?: boolean;
+}) {
+  const parsed = useMemo(() => parseAssistantMessage(content), [content]);
+  const text = parsed.text || content;
+
   return (
     <div className="msg">
       <span className="msg-role">Builder</span>
       {text && <div className="msg-body">{text}</div>}
-      {(paths.length > 0 || working) && (
+      {(parsed.paths.length > 0 || buildEvents.length > 0 || parsed.working) && (
         <div className="chips">
-          {paths.map((path) => (
+          {parsed.paths.map((path) => (
             <span className="chip" key={path}>
               <FileCode size={11} />
               {path}
             </span>
           ))}
-          {working && <span className="chip working">writing files…</span>}
+          {buildEvents.map((event) => (
+            <span
+              className={`chip ${event.status === "start" ? "working" : ""} ${event.status === "error" ? "chip-error" : ""} ${event.status === "done" || event.status === "deleted" ? "chip-done" : ""}`}
+              key={event.path}
+            >
+              <FileCode size={11} />
+              {event.status === "deleted" ? "removed " : ""}
+              {event.path}
+              {event.status === "start" ? "…" : ""}
+              {event.status === "error" ? ` (${event.error ?? "failed"})` : ""}
+            </span>
+          ))}
+          {parsed.working && <span className="chip working">writing files…</span>}
         </div>
       )}
-      {streaming && !text && !working && paths.length === 0 && (
+      {building && buildEvents.length === 0 && (
+        <span className="chip working">Applying changes…</span>
+      )}
+      {streaming && !text && buildEvents.length === 0 && !parsed.working && (
         <span className="thinking">
           <i /> <i /> <i />
         </span>
       )}
+    </div>
+  );
+}
+
+function DataAdminPanel({
+  projectId,
+  files,
+  onChanged,
+}: {
+  projectId: string;
+  files: ProjectFile[];
+  onChanged: () => void;
+}) {
+  const [data, setData] = useState<AppData>({});
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const rulesFile = files.find((file) => file.path === "database.rules.json");
+  const rules = useMemo(() => {
+    if (!rulesFile?.content) return null;
+    try {
+      return JSON.parse(rulesFile.content) as { tables?: Record<string, { fields?: Record<string, unknown> }> };
+    } catch {
+      return null;
+    }
+  }, [rulesFile?.content]);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    const response = await fetch(`/api/projects/${projectId}/data`);
+    if (response.ok) {
+      const payload = await response.json();
+      setData(payload.data ?? {});
+    }
+    setLoading(false);
+  }, [projectId]);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  async function saveRow(table: string, row: Record<string, unknown>) {
+    await fetch(`/api/projects/${projectId}/data`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ table, id: row.id, row }),
+    });
+    await loadData();
+    onChanged();
+  }
+
+  async function deleteRow(table: string, rowId: string) {
+    await fetch(`/api/projects/${projectId}/data?table=${encodeURIComponent(table)}&id=${encodeURIComponent(rowId)}`, {
+      method: "DELETE",
+    });
+    await loadData();
+    onChanged();
+  }
+
+  if (!rules?.tables || Object.keys(rules.tables).length === 0) {
+    return (
+      <div className="data-empty">
+        <Database size={28} strokeWidth={1.5} />
+        <p>No database yet.</p>
+        <p className="muted">Ask the builder to &ldquo;add a database&rdquo; — it will create <code>database.rules.json</code> and wire <code>window.db</code> in your app.</p>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="data-empty">
+        <span className="thinking">
+          <i /> <i /> <i />
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="data-panel">
+      {Object.keys(rules.tables).map((table) => {
+        const rows = data[table] ?? [];
+        const open = expanded[table] ?? true;
+        return (
+          <div className="data-table" key={table}>
+            <button
+              className="data-table-head"
+              type="button"
+              onClick={() => setExpanded((current) => ({ ...current, [table]: !open }))}
+            >
+              {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+              <span className="mono">{table}</span>
+              <span className="muted">[{rows.length}]</span>
+            </button>
+            {open && (
+              <div className="data-rows">
+                {rows.length === 0 ? (
+                  <div className="data-row-empty muted">No rows</div>
+                ) : (
+                  rows.map((row) => (
+                    <div className="data-row" key={String(row.id)}>
+                      <pre className="data-row-json">{JSON.stringify(row, null, 2)}</pre>
+                      <div className="data-row-actions">
+                        <button
+                          className="btn-ghost"
+                          type="button"
+                          style={{ minHeight: 26, fontSize: 12 }}
+                          onClick={() => {
+                            const next = prompt("Edit row JSON", JSON.stringify(row, null, 2));
+                            if (!next) return;
+                            try {
+                              void saveRow(table, JSON.parse(next) as Record<string, unknown>);
+                            } catch {
+                              alert("Invalid JSON");
+                            }
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="btn-icon btn-danger"
+                          type="button"
+                          style={{ width: 26, minHeight: 26 }}
+                          onClick={() => void deleteRow(table, String(row.id))}
+                          title="Delete row"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -105,11 +275,14 @@ export default function AppWorkspace() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [input, setInput] = useState("");
-  const [streamText, setStreamText] = useState("");
+  const [streamChat, setStreamChat] = useState("");
+  const [buildEvents, setBuildEvents] = useState<BuildFileStatus[]>([]);
+  const [isBuilding, setIsBuilding] = useState(false);
+  const [planStreaming, setPlanStreaming] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  const [tab, setTab] = useState<"preview" | "code">("preview");
+  const [tab, setTab] = useState<"preview" | "code" | "data">("preview");
   const [previewKey, setPreviewKey] = useState(0);
   const [selectedPath, setSelectedPath] = useState("");
   const [draftPath, setDraftPath] = useState("");
@@ -119,6 +292,10 @@ export default function AppWorkspace() {
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [customModel, setCustomModel] = useState("");
+  const [chatError, setChatError] = useState("");
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const didSendStarter = useRef(false);
@@ -128,6 +305,11 @@ export default function AppWorkspace() {
   const errorCount = useMemo(
     () => consoleEntries.filter((entry) => entry.level === "error").length,
     [consoleEntries]
+  );
+
+  const hasDatabase = useMemo(
+    () => files.some((file) => file.path === "database.rules.json"),
+    [files]
   );
 
   const load = useCallback(async () => {
@@ -149,7 +331,6 @@ export default function AppWorkspace() {
   }, [id]);
 
   useEffect(() => {
-    // Guard against StrictMode double-invocation clobbering optimistic chat state.
     if (didLoad.current) return;
     didLoad.current = true;
     void load();
@@ -157,9 +338,8 @@ export default function AppWorkspace() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, streamText]);
+  }, [messages, streamChat, buildEvents]);
 
-  // Capture console output forwarded by the preview iframe runtime.
   useEffect(() => {
     function onMessage(event: MessageEvent) {
       const data = event.data;
@@ -196,7 +376,11 @@ export default function AppWorkspace() {
       loadingRef.current = true;
       setInput("");
       setLoading(true);
-      setStreamText("");
+      setStreamChat("");
+      setBuildEvents([]);
+      setIsBuilding(false);
+      setPlanStreaming(true);
+      setChatError("");
       setMessages((current) => [
         ...current,
         { id: crypto.randomUUID(), role: "user", content },
@@ -210,34 +394,40 @@ export default function AppWorkspace() {
         });
 
         if (!response.ok || !response.body) {
-          throw new Error(await response.text());
+          const detail = (await response.text()).trim();
+          throw new Error(detail || response.statusText);
         }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
-        let fullText = "";
+        let raw = "";
 
         while (true) {
           const { done, value } = await reader.read();
+          if (value) {
+            raw += decoder.decode(value, { stream: true });
+            const parsed = parseBuilderStream(raw);
+            setStreamChat(parsed.chat);
+            setBuildEvents(parsed.events);
+            setPlanStreaming(!parsed.planDone && parsed.events.length === 0);
+            setIsBuilding(parsed.planDone || parsed.events.length > 0);
+          }
           if (done) break;
-          fullText += decoder.decode(value, { stream: true });
-          setStreamText(fullText);
         }
 
-        setStreamText("");
+        setStreamChat("");
+        setBuildEvents([]);
+        setIsBuilding(false);
+        setPlanStreaming(false);
         await refreshData();
         refreshPreview();
         setTab("preview");
       } catch (error) {
-        setStreamText("");
-        setMessages((current) => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: `Something went wrong: ${error instanceof Error ? error.message : "request failed"}`,
-          },
-        ]);
+        setStreamChat("");
+        setBuildEvents([]);
+        setIsBuilding(false);
+        setPlanStreaming(false);
+        setChatError(error instanceof Error ? error.message : "Request failed");
       } finally {
         loadingRef.current = false;
         setLoading(false);
@@ -246,7 +436,6 @@ export default function AppWorkspace() {
     [id, input, refreshPreview]
   );
 
-  // Kick off the starter prompt from the home page exactly once.
   useEffect(() => {
     const starter = searchParams.get("prompt");
     if (!starter || !loaded || didSendStarter.current || messages.length > 0) return;
@@ -269,11 +458,36 @@ export default function AppWorkspace() {
   async function changeModel(model: string) {
     if (!project) return;
     setProject({ ...project, model });
-    await fetch(`/api/projects/${id}`, {
+    const response = await fetch(`/api/projects/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
     });
+    if (!response.ok) {
+      const raw = (await response.text()).trim();
+      try {
+        const parsed = JSON.parse(raw) as { error?: string };
+        setChatError(parsed.error ?? raw);
+      } catch {
+        setChatError(raw || response.statusText);
+      }
+      void load();
+    }
+  }
+
+  async function saveApiKey(clear = false) {
+    const response = await fetch(`/api/projects/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ openrouter_api_key: clear ? "" : apiKeyDraft.trim() }),
+    });
+    if (!response.ok) {
+      setChatError("Could not save API key");
+      return;
+    }
+    setSettingsOpen(false);
+    setApiKeyDraft("");
+    await load();
   }
 
   function pickFile(file: ProjectFile) {
@@ -317,7 +531,7 @@ export default function AppWorkspace() {
 
   if (notFound) {
     return (
-      <div className="ws" style={{ placeItems: "center", display: "grid" }}>
+      <div className="page-loader">
         <div className="empty" style={{ border: 0 }}>
           <div>
             <p>This project doesn&apos;t exist or isn&apos;t yours.</p>
@@ -331,14 +545,11 @@ export default function AppWorkspace() {
   }
 
   if (!project) {
-    return (
-      <div className="ws" style={{ placeItems: "center", display: "grid" }}>
-        <span className="thinking">
-          <i /> <i /> <i />
-        </span>
-      </div>
-    );
+    return <PageLoader />;
   }
+
+  const modelLabel = (modelId: string) =>
+    project.ai.models.find((model) => model.id === modelId)?.name ?? modelId;
 
   return (
     <div className="ws">
@@ -346,20 +557,33 @@ export default function AppWorkspace() {
         <Link className="btn-icon" href="/" title="Your apps">
           <ArrowLeft size={16} />
         </Link>
+        <BrandLogo size="sm" showSubtitle={false} href="/" />
+        <span className="ws-divider" aria-hidden />
         <span className="ws-title">{project.name}</span>
         <span className="ws-spacer" />
         <select
           className="select"
-          value={project.model || MODELS[0]}
+          value={project.model}
           onChange={(event) => changeModel(event.target.value)}
           title="Model"
         >
-          {MODELS.map((model) => (
-            <option key={model} value={model}>
-              {model}
+          {project.ai.models.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.name}
+              {model.free ? " · free" : ""}
             </option>
           ))}
         </select>
+        <button
+          className="btn-icon"
+          onClick={() => {
+            setApiKeyDraft("");
+            setSettingsOpen(true);
+          }}
+          title="OpenRouter settings"
+        >
+          <Settings2 size={15} />
+        </button>
         <button className="btn-ghost" onClick={() => setShareOpen(true)}>
           <Share2 size={14} />
           Share
@@ -374,7 +598,7 @@ export default function AppWorkspace() {
       <div className="ws-body">
         <section className="chat-col">
           <div className="messages">
-            {messages.length === 0 && !streamText && !loading && (
+            {messages.length === 0 && !streamChat && !loading && (
               <div className="empty" style={{ border: 0, minHeight: 120 }}>
                 Describe what to build, or what to change.
               </div>
@@ -389,9 +613,22 @@ export default function AppWorkspace() {
                 <AssistantMessage content={message.content} key={message.id} />
               )
             )}
-            {loading && <AssistantMessage content={streamText} streaming />}
+            {loading && (
+              <AssistantMessage
+                content={streamChat}
+                streaming={planStreaming}
+                buildEvents={buildEvents}
+                building={isBuilding}
+              />
+            )}
             <div ref={bottomRef} />
           </div>
+
+          {chatError && (
+            <div className="chat-error" role="alert">
+              {chatError}
+            </div>
+          )}
 
           <form
             className="composer"
@@ -410,14 +647,15 @@ export default function AppWorkspace() {
                     void sendMessage();
                   }
                 }}
-                placeholder="Add a dark mode toggle, fix the layout on mobile..."
+                placeholder="Add a dark mode toggle, add a database for todos..."
               />
               <div className="composer-foot">
                 <span className="muted" style={{ fontSize: 12 }}>
                   {files.length} {files.length === 1 ? "file" : "files"}
+                  {hasDatabase ? " · database" : ""}
                 </span>
                 <button className="btn" type="submit" disabled={loading || !input.trim()}>
-                  {loading ? "Working…" : "Send"}
+                  {loading ? (isBuilding ? "Building files…" : "Planning…") : "Send"}
                   <ArrowUp size={14} />
                 </button>
               </div>
@@ -435,6 +673,10 @@ export default function AppWorkspace() {
               <Code2 size={13} />
               Code
             </button>
+            <button className={`tab ${tab === "data" ? "active" : ""}`} onClick={() => setTab("data")}>
+              <Database size={13} />
+              Data
+            </button>
             <span className="ws-spacer" />
             <button className="btn-icon" onClick={refreshPreview} title="Reload preview">
               <RotateCw size={14} />
@@ -450,7 +692,7 @@ export default function AppWorkspace() {
                 src={`/p/${id}?v=${previewKey}`}
                 sandbox="allow-scripts allow-forms allow-popups allow-modals"
               />
-            ) : (
+            ) : tab === "code" ? (
               <div className="code-layout">
                 <div className="file-list">
                   <button className="file-row" onClick={newFile} title="New file">
@@ -499,6 +741,8 @@ export default function AppWorkspace() {
                   />
                 </form>
               </div>
+            ) : (
+              <DataAdminPanel projectId={id} files={files} onChanged={refreshPreview} />
             )}
           </div>
 
@@ -562,6 +806,71 @@ export default function AppWorkspace() {
             setShareOpen(false);
           }}
         />
+      )}
+
+      {settingsOpen && (
+        <div className="modal-backdrop" onClick={() => setSettingsOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h2>OpenRouter settings</h2>
+            <p className="muted" style={{ fontSize: 13, lineHeight: 1.5 }}>
+              Without your own key, you can use the free auto router or pick any free model from OpenRouter.
+              Add a project API key to unlock paid models, Auto (smart routing), and custom model IDs.
+            </p>
+            <div>
+              <label className="label" htmlFor="api-key">
+                <KeyRound size={12} style={{ display: "inline", marginRight: 6 }} />
+                Project API key
+              </label>
+              <input
+                id="api-key"
+                className="input mono"
+                type="password"
+                placeholder={project.ai.hasProjectKey ? "Key saved — paste new to replace" : "sk-or-..."}
+                value={apiKeyDraft}
+                onChange={(event) => setApiKeyDraft(event.target.value)}
+              />
+            </div>
+            <p className="muted" style={{ fontSize: 12 }}>
+              Current model: {modelLabel(project.model)}
+            </p>
+            {project.ai.hasProjectKey && (
+              <div>
+                <label className="label" htmlFor="custom-model">
+                  Custom model ID (optional)
+                </label>
+                <div className="share-link-row">
+                  <input
+                    id="custom-model"
+                    className="input mono"
+                    placeholder="provider/model-name"
+                    value={customModel}
+                    onChange={(event) => setCustomModel(event.target.value)}
+                  />
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    onClick={() => customModel.trim() && changeModel(customModel.trim())}
+                  >
+                    Use
+                  </button>
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              {project.ai.hasProjectKey && (
+                <button className="btn-ghost btn-danger" type="button" onClick={() => void saveApiKey(true)}>
+                  Remove key
+                </button>
+              )}
+              <button className="btn-ghost" type="button" onClick={() => setSettingsOpen(false)}>
+                Cancel
+              </button>
+              <button className="btn" type="button" onClick={() => void saveApiKey()} disabled={!apiKeyDraft.trim()}>
+                Save key
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -2,7 +2,7 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 // Public surface: the home page (renders its own signed-out state), published
 // apps, and the AI proxy that published apps call from a sandboxed origin.
-const isPublicRoute = createRouteMatcher(["/", "/p/(.*)", "/api/app-ai"]);
+const isPublicRoute = createRouteMatcher(["/", "/p/(.*)", "/api/app-ai", "/api/app-data"]);
 
 export const proxy = clerkMiddleware(async (auth, request) => {
   if (!isPublicRoute(request)) {

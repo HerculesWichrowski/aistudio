@@ -61,6 +61,25 @@ function runtimeScript(origin: string, projectId: string) {
       return data.text;
     }
   };
+
+  async function dbCall(action, table, extra) {
+    var response = await fetch(${JSON.stringify(origin)} + "/api/app-data", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ projectId: ${JSON.stringify(projectId)}, action: action, table: table }, extra || {}))
+    });
+    if (!response.ok) throw new Error("Database request failed: " + (await response.text()));
+    var data = await response.json();
+    return data.result;
+  }
+
+  window.db = {
+    list: function (table) { return dbCall("list", table); },
+    get: function (table, id) { return dbCall("get", table, { id: id }); },
+    insert: function (table, row) { return dbCall("insert", table, { row: row }); },
+    update: function (table, id, patch) { return dbCall("update", table, { id: id, patch: patch }); },
+    delete: function (table, id) { return dbCall("delete", table, { id: id }); }
+  };
 })();
 </script>`;
 }
