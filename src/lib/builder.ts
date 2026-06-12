@@ -122,12 +122,50 @@ Rules:
 - No prose outside the fence.`;
 
 export function extractBuildPlan(text: string): BuildPlan | null {
-  const match = text.match(/```build_plan\s*([\s\S]*?)```/);
-  if (!match) return extractBuildPlanLenient(text);
+  const fenced = text.match(/```build_plan\s*([\s\S]*?)```/);
+  if (fenced) {
+    try {
+      return normalizeBuildPlan(JSON.parse(fenced[1].trim()) as BuildPlan);
+    } catch {
+      return extractBuildPlanLenient(fenced[1]);
+    }
+  }
+
+  const xmlPlan = text.match(/<build_plan>\s*([\s\S]*?)<\/build_plan>/i);
+  if (xmlPlan) {
+    try {
+      return normalizeBuildPlan(JSON.parse(xmlPlan[1].trim()) as BuildPlan);
+    } catch {
+      return extractBuildPlanLenient(xmlPlan[1]);
+    }
+  }
+
+  const toolCallPlan = extractBuildPlanFromToolCall(text);
+  if (toolCallPlan) return toolCallPlan;
+
+  return extractBuildPlanLenient(text);
+}
+
+function extractBuildPlanFromToolCall(text: string): BuildPlan | null {
+  const match = text.match(/<tool_call>\s*build_plan\s*([\s\S]*?)<\/tool_call>/i);
+  if (!match) return null;
+
+  const args: Record<string, string> = {};
+  const argRegex = /<arg_key>([\s\S]*?)<\/arg_key>\s*<arg_value>([\s\S]*?)<\/arg_value>/gi;
+  for (const argMatch of match[1].matchAll(argRegex)) {
+    args[argMatch[1].trim()] = argMatch[2].trim();
+  }
+
+  if (!args.summary && !args.upsert && !args.delete) return null;
+
   try {
-    return normalizeBuildPlan(JSON.parse(match[1].trim()) as BuildPlan);
+    return normalizeBuildPlan({
+      summary: args.summary,
+      upsert: args.upsert ? (JSON.parse(args.upsert) as string[]) : [],
+      delete: args.delete ? (JSON.parse(args.delete) as string[]) : [],
+    });
   } catch {
-    return extractBuildPlanLenient(text);
+    return null;
   }
 }
 
@@ -213,7 +251,9 @@ export function inferEditPaths(message: string, files: VirtualFile[]) {
 export function sanitizeHistoryForBuilder(history: ChatMessage[]) {
   return history.map((message) => {
     if (message.role !== "assistant") return message;
-    const stripped = message.content.replace(/```file_operation\s*[\s\S]*?```/g, "").trim();
+    const stripped = stripVisiblePlanText(
+      message.content.replace(/```file_operation\s*[\s\S]*?```/g, "")
+    ).trim();
     return { ...message, content: stripped };
   });
 }
@@ -295,6 +335,10 @@ export function extractFileOperations(text: string) {
 export function stripVisiblePlanText(text: string) {
   let result = text.replace(/```build_plan\s*[\s\S]*?```/g, "");
   result = result.replace(/```build_plan[\s\S]*$/g, "");
+  result = result.replace(/<build_plan>\s*[\s\S]*?<\/build_plan>/gi, "");
+  result = result.replace(/<build_plan>[\s\S]*$/gi, "");
+  result = result.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "");
+  result = result.replace(/<tool_call>[\s\S]*$/gi, "");
   result = result.replace(/```[\s\S]*$/g, "");
   result = result.replace(/\n\s*[-*]\s*\*\*(Create|Edit|Delete)[^\n]*/gi, "");
   return result.replace(/\n{3,}/g, "\n\n").trimEnd();

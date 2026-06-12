@@ -32,7 +32,7 @@ export default function ModelSelect({
         className="model-select-input"
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        style={{ width: `${Math.max(displayText.length + 2, 10)}ch` }}
+        style={{ width: `${Math.max(displayText.length - 6, 2)}ch` }}
         title={title}
         value={value}
       >
