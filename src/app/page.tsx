@@ -4,7 +4,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Show, SignInButton, UserButton, useClerk, useUser } from "@clerk/nextjs";
 import { ArrowUp, Globe, Link2, Trash2 } from "lucide-react";
-import { stashPendingPrompt, takePendingPrompt } from "@/lib/pending-prompt";
+import { stashPendingPrompt, takePendingModel, takePendingPrompt } from "@/lib/pending-prompt";
 import BrandLogo from "@/components/BrandLogo";
 
 type Project = {
@@ -14,6 +14,8 @@ type Project = {
   visibility: string;
   updated_at: number;
 };
+
+type ModelOption = { id: string; name: string; free: boolean };
 
 function nameFromPrompt(prompt: string) {
   const words = prompt.replace(/\s+/g, " ").trim().split(" ").slice(0, 6).join(" ");
@@ -35,10 +37,23 @@ export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [selectedModel, setSelectedModel] = useState("openrouter/free");
   const pendingHandled = useRef(false);
 
+  useEffect(() => {
+    fetch("/api/models")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        if (!payload?.models?.length) return;
+        setModels(payload.models);
+        setSelectedModel(payload.defaultModel ?? payload.models[0].id);
+      })
+      .catch(() => {});
+  }, []);
+
   const createProject = useCallback(
-    async (rawPrompt: string) => {
+    async (rawPrompt: string, model = selectedModel) => {
       const trimmed = rawPrompt.trim();
       if (!trimmed) return false;
 
@@ -50,6 +65,7 @@ export default function Home() {
           body: JSON.stringify({
             name: nameFromPrompt(trimmed),
             description: trimmed.slice(0, 180),
+            model,
           }),
         });
         if (!response.ok) throw new Error(await response.text());
@@ -61,7 +77,7 @@ export default function Home() {
         return false;
       }
     },
-    [router]
+    [router, selectedModel]
   );
 
   useEffect(() => {
@@ -77,8 +93,10 @@ export default function Home() {
     const pending = takePendingPrompt();
     if (pending) {
       pendingHandled.current = true;
+      const pendingModel = takePendingModel();
       setPrompt(pending);
-      void createProject(pending);
+      if (pendingModel) setSelectedModel(pendingModel);
+      void createProject(pending, pendingModel || selectedModel);
       return;
     }
 
@@ -87,7 +105,7 @@ export default function Home() {
       .then((response) => (response.ok ? response.json() : []))
       .then(setProjects)
       .finally(() => setLoadingProjects(false));
-  }, [isLoaded, isSignedIn, createProject]);
+  }, [isLoaded, isSignedIn, createProject, selectedModel]);
 
   async function onSubmit(event?: FormEvent) {
     event?.preventDefault();
@@ -95,12 +113,12 @@ export default function Home() {
     if (!trimmed || creating) return;
 
     if (!isSignedIn) {
-      stashPendingPrompt(trimmed);
+      stashPendingPrompt(trimmed, selectedModel);
       openSignIn({});
       return;
     }
 
-    await createProject(trimmed);
+    await createProject(trimmed, selectedModel);
   }
 
   async function deleteProject(id: string) {
@@ -146,11 +164,22 @@ export default function Home() {
             placeholder="A flashcard trainer that uses AI to generate cards from any topic I type in..."
           />
           <div className="prompt-card-foot">
-            <span className="muted" style={{ fontSize: 12 }}>
-              {isSignedIn
-                ? "Enter to create · Shift+Enter for newline"
-                : "Enter to build · you'll sign in first"}
-            </span>
+            <select
+              className="select"
+              value={selectedModel}
+              onChange={(event) => setSelectedModel(event.target.value)}
+              title="Builder model"
+              disabled={creating || models.length === 0}
+            >
+              {(models.length > 0 ? models : [{ id: selectedModel, name: "Free (auto free models)", free: true }]).map(
+                (model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                    {model.free ? " · free" : ""}
+                  </option>
+                )
+              )}
+            </select>
             <button className="btn" type="submit" disabled={creating || !prompt.trim()}>
               {creating ? "Creating…" : "Build"}
               <ArrowUp size={14} />

@@ -43,13 +43,18 @@ export async function getProject(id: string) {
   return (r.rows?.[0] as unknown as Project) ?? null;
 }
 
-export async function createProject(userId: string, name: string, description = "") {
+export async function createProject(
+  userId: string,
+  name: string,
+  description = "",
+  model = DEFAULT_MODEL
+) {
   const id = nanoid();
   await turso(
-    "INSERT INTO projects (id, name, description, user_id) VALUES (?, ?, ?, ?)",
-    [id, name, description, userId]
+    "INSERT INTO projects (id, name, description, model, user_id) VALUES (?, ?, ?, ?, ?)",
+    [id, name, description, model, userId]
   );
-  return { id, name, description };
+  return { id, name, description, model };
 }
 
 export async function updateProject(id: string, fields: Record<string, string>) {

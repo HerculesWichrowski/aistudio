@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { initDB } from "@/lib/db";
-import { DATABASE_RULES_PATH, parseRules, runDataOperation } from "@/lib/database";
+import { DATABASE_RULES_PATH, loadProjectRules, runDataOperation } from "@/lib/database";
 import { getProject, listFiles } from "@/lib/projects";
 
 const CORS_HEADERS = {
@@ -33,12 +33,21 @@ export async function POST(req: NextRequest) {
     return new Response("Unknown project", { status: 404, headers: CORS_HEADERS });
   }
 
-  const files = await listFiles(projectId);
-  const rulesFile = files.find((file) => file.path === DATABASE_RULES_PATH);
-  const rules = parseRules(String(rulesFile?.content ?? ""));
+  const files = (await listFiles(projectId)) as unknown as { path: string; content: string }[];
+  const { rulesFile, rules } = loadProjectRules(files);
+
+  if (!rulesFile) {
+    return new Response("database.rules.json was not found in project files", {
+      status: 400,
+      headers: CORS_HEADERS,
+    });
+  }
 
   if (!rules?.tables || Object.keys(rules.tables).length === 0) {
-    return new Response("This app has no database.rules.json", { status: 400, headers: CORS_HEADERS });
+    return new Response(
+      "database.rules.json exists but has no valid tables. Expected { \"tables\": { \"employees\": { \"fields\": { \"name\": { \"type\": \"string\" } } } } }",
+      { status: 400, headers: CORS_HEADERS }
+    );
   }
 
   try {

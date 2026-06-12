@@ -52,7 +52,23 @@ Apps can persist data without a backend when \`database.rules.json\` exists:
 - \`await window.db.insert("tableName", { field: value })\`
 - \`await window.db.update("tableName", id, { field: value })\`
 - \`await window.db.delete("tableName", id)\`
-Rules live in \`database.rules.json\` and define table names + field types. When the user asks for a database, create that file and wire the UI to window.db.
+
+\`database.rules.json\` MUST use this exact shape (top-level \`tables\` key is required):
+
+\`\`\`json
+{
+  "tables": {
+    "employees": {
+      "fields": {
+        "name": { "type": "string", "required": true },
+        "active": { "type": "boolean", "default": true }
+      }
+    }
+  }
+}
+\`\`\`
+
+When the user asks for a database, create that file and wire the UI to window.db.
 
 ## Quality bar
 - Ship complete, working features. No TODOs, no placeholder screens.
@@ -80,6 +96,15 @@ When code changes ARE needed, end your reply with exactly one hidden machine blo
 {"summary":"internal one-line plan","upsert":["index.html"],"delete":[]}
 \`\`\`
 
+## Follow-up edits — always emit build_plan
+If the project already has files and the user asks to change, update, fix, add, restyle, or improve anything, you MUST include build_plan with every file that needs to change:
+- CSS / colors / theme / fonts / layout → \`styles.css\` if it exists, otherwise \`index.html\` (when styles are inline)
+- UI structure / HTML → \`index.html\`
+- Behavior / logic / features → \`app.js\` (and \`index.html\` if markup changes too)
+- Database / tables / fields → \`database.rules.json\` plus any files that use the data
+
+Never say you will update the app without also emitting build_plan. Acknowledging the request in chat is not enough — the block is required for files to change.
+
 If the user only asks a question with no code changes, answer normally and omit the build_plan block.`;
 
 const FILE_PROMPT = `${BASE_SYSTEM}
@@ -98,12 +123,147 @@ Rules:
 
 export function extractBuildPlan(text: string): BuildPlan | null {
   const match = text.match(/```build_plan\s*([\s\S]*?)```/);
-  if (!match) return null;
+  if (!match) return extractBuildPlanLenient(text);
   try {
-    return JSON.parse(match[1].trim()) as BuildPlan;
+    return normalizeBuildPlan(JSON.parse(match[1].trim()) as BuildPlan);
+  } catch {
+    return extractBuildPlanLenient(text);
+  }
+}
+
+function normalizeBuildPlan(raw: BuildPlan | null): BuildPlan | null {
+  if (!raw) return null;
+  return {
+    summary: raw.summary,
+    upsert: [...new Set((raw.upsert ?? []).filter(Boolean))],
+    delete: [...new Set((raw.delete ?? []).filter(Boolean))],
+  };
+}
+
+/** Recover plan JSON when the model omits fences or uses slightly invalid JSON. */
+export function extractBuildPlanLenient(text: string): BuildPlan | null {
+  const objectMatch = text.match(/\{[\s\S]*?"upsert"\s*:[\s\S]*?\}/);
+  if (!objectMatch) return null;
+  try {
+    return normalizeBuildPlan(JSON.parse(objectMatch[0]) as BuildPlan);
   } catch {
     return null;
   }
+}
+
+const EDIT_VERB =
+  /\b(update|change|add|remove|fix|make|set|turn|enable|disable|implement|modify|edit|adjust|improve|refactor|move|rename|replace|switch|restyle|style|redesign|tweak|dark|light|theme|color|font|build|create|please|could you|can you|want|need|should|try)\b/i;
+
+const QUESTION_ONLY =
+  /^(how|what|why|where|when|who|can you explain|tell me about|is there|does|do)\b/i;
+
+const STYLE_KEYWORDS =
+  /\b(css|style|styling|color|colou?r|theme|dark mode|light mode|font|gradient|background|design|layout|responsive|spacing|margin|padding|look|appearance|visual|ui|ux)\b/i;
+
+const JS_KEYWORDS =
+  /\b(javascript|function|feature|button|click|logic|behavior|bug|error|handler|event|fetch|api)\b/i;
+
+const HTML_KEYWORDS =
+  /\b(html|page|title|heading|section|form|input|modal|nav|menu|structure|markup|element)\b/i;
+
+const DB_KEYWORDS =
+  /\b(database|schema|table|field|column|persist|store data|record|row)\b/i;
+
+export function looksLikeEditRequest(message: string, hasExistingFiles: boolean) {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  if (!hasExistingFiles) return true;
+  if (QUESTION_ONLY.test(trimmed) && !EDIT_VERB.test(trimmed)) return false;
+  return EDIT_VERB.test(trimmed);
+}
+
+function hasFile(files: VirtualFile[], path: string) {
+  return files.some((file) => file.path === path);
+}
+
+function cssTargetPath(files: VirtualFile[]) {
+  if (hasFile(files, "styles.css")) return "styles.css";
+  const html = files.find((file) => file.path === "index.html");
+  if (html) return "index.html";
+  return "styles.css";
+}
+
+/** Guess which files to regenerate when the model forgets build_plan. */
+export function inferEditPaths(message: string, files: VirtualFile[]) {
+  const paths = new Set<string>();
+
+  if (STYLE_KEYWORDS.test(message)) paths.add(cssTargetPath(files));
+  if (JS_KEYWORDS.test(message) && hasFile(files, "app.js")) paths.add("app.js");
+  if (HTML_KEYWORDS.test(message) && hasFile(files, "index.html")) paths.add("index.html");
+  if (DB_KEYWORDS.test(message) && hasFile(files, "database.rules.json")) {
+    paths.add("database.rules.json");
+  }
+
+  if (paths.size > 0) return [...paths];
+
+  if (files.length === 0) return ["index.html", "styles.css", "app.js"];
+
+  for (const path of ["index.html", "styles.css", "app.js", "database.rules.json"]) {
+    if (hasFile(files, path)) paths.add(path);
+  }
+
+  return [...paths];
+}
+
+export function sanitizeHistoryForBuilder(history: ChatMessage[]) {
+  return history.map((message) => {
+    if (message.role !== "assistant") return message;
+    const stripped = message.content.replace(/```file_operation\s*[\s\S]*?```/g, "").trim();
+    return { ...message, content: stripped };
+  });
+}
+
+const PLAN_REPAIR_PROMPT = `${BASE_SYSTEM}
+
+Output ONLY one build_plan block — no visible chat text.
+List every project file path that must be created or updated for the user's latest request.
+Use paths exactly as they appear in the project structure (e.g. styles.css, index.html, app.js).
+
+\`\`\`build_plan
+{"summary":"internal one-line plan","upsert":["styles.css"],"delete":[]}
+\`\`\``;
+
+export async function generatePlanRepair(
+  project: Project,
+  files: VirtualFile[],
+  history: ChatMessage[],
+  userRequest: string
+) {
+  const messages = buildContextMessages(files, history.slice(0, -1), PLAN_REPAIR_PROMPT);
+  messages.push({ role: "user", content: `Latest request:\n${userRequest}` });
+
+  const text = await completeOnce(project, messages, { maxTokens: 512 });
+  return extractBuildPlan(text);
+}
+
+export async function resolveBuildPlan(
+  project: Project,
+  files: VirtualFile[],
+  history: ChatMessage[],
+  planRaw: string,
+  userRequest: string
+) {
+  let plan = extractBuildPlan(planRaw);
+  if ((plan?.upsert?.length ?? 0) > 0 || (plan?.delete?.length ?? 0) > 0) return plan;
+
+  if (!looksLikeEditRequest(userRequest, files.length > 0)) return null;
+
+  plan = await generatePlanRepair(project, files, history, userRequest);
+  if ((plan?.upsert?.length ?? 0) > 0 || (plan?.delete?.length ?? 0) > 0) return plan;
+
+  const upsert = inferEditPaths(userRequest, files);
+  if (upsert.length === 0) return null;
+
+  return {
+    summary: planSummaryText(planRaw) || userRequest,
+    upsert,
+    delete: [],
+  };
 }
 
 export function extractFileOperations(text: string) {
@@ -281,14 +441,15 @@ export async function generatePlan(
   project: Project,
   files: VirtualFile[],
   history: ChatMessage[],
-  onVisibleDelta: (visibleChunk: string) => void
+  onVisibleDelta: (visibleChunk: string) => void,
+  sessionPaths: string[] = []
 ) {
   let raw = "";
   let lastVisible = "";
 
   await streamCompletion(
     project,
-    buildContextMessages(files, history, PLAN_PROMPT),
+    buildContextMessages(files, history, PLAN_PROMPT, { sessionPaths }),
     (delta) => {
       raw += delta;
       const visible = stripVisiblePlanText(raw);
@@ -312,6 +473,10 @@ export async function generateFile(
   const instruction = [
     `Implement ONLY the file "${path}".`,
     plan.summary ? `Plan: ${plan.summary}` : "",
+    path === "database.rules.json"
+      ? `Use this exact JSON shape with a top-level "tables" key:
+{"tables":{"tableName":{"fields":{"fieldName":{"type":"string","required":true}}}}}`
+      : "",
     `Return the complete file in a single \`\`\`file:${path}\`\`\` block.`,
   ]
     .filter(Boolean)

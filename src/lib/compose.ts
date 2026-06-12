@@ -10,7 +10,10 @@ function runtimeScript(origin: string, projectId: string) {
   return `<script>
 (function () {
   var send = function (level, text) {
-    try { parent.postMessage({ __aistudio: true, type: "console", level: level, text: String(text).slice(0, 2000) }, "*"); } catch (e) {}
+    var msg = String(text).slice(0, 2000);
+    var ignore = /ResizeObserver loop|chrome-extension:|moz-extension:|safari-extension:|^Script error\\.?$/i;
+    if (ignore.test(msg.trim())) return;
+    try { parent.postMessage({ __aistudio: true, type: "console", level: level, text: msg }, "*"); } catch (e) {}
   };
   var fmt = function (args) {
     return Array.prototype.map.call(args, function (a) {

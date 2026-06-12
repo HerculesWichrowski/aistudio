@@ -17,6 +17,7 @@ import {
   Eye,
   KeyRound,
   Loader2,
+  Paperclip,
   Pencil,
   RotateCw,
   Save,
@@ -24,16 +25,30 @@ import {
   Share2,
   Trash2,
   Wrench,
+  X,
 } from "lucide-react";
 import ShareDialog from "./ShareDialog";
 import PageLoader from "./PageLoader";
 import BrandLogo from "./BrandLogo";
+import { loadProjectRules, type FieldRule } from "@/lib/database";
+import { selectFileContext } from "@/lib/context";
+import { shouldCaptureConsole } from "@/lib/console-filter";
 import {
-  parseBuilderStream,
   parseStoredFileOps,
   type BuildFileStatus,
   type StoredFileOp,
 } from "@/lib/build-stream-client";
+
+type BuildRunSnapshot = {
+  id: string;
+  projectId: string;
+  status: "running" | "done" | "error";
+  phase: "planning" | "building" | "idle";
+  streamChat: string;
+  events: BuildFileStatus[];
+  error: string;
+  updatedAt: number;
+};
 
 type Message = { id: string; role: string; content: string };
 type ProjectFile = { id: string; path: string; content: string };
@@ -170,28 +185,137 @@ function UserMessage({
 }) {
   return (
     <div className="msg user">
-      <div className="msg-user-row">
-        <div className="msg-body">{content}</div>
-        <div className="msg-actions">
-          <button
-            className="msg-action"
-            disabled={disabled}
-            onClick={onEdit}
-            title="Edit message"
-            type="button"
-          >
-            <Pencil size={12} />
-          </button>
-          <button
-            className="msg-action"
-            disabled={disabled}
-            onClick={onRedo}
-            title="Redo from here"
-            type="button"
-          >
-            <RotateCw size={12} />
-          </button>
-        </div>
+      <div className="msg-body">{content}</div>
+      <div className="msg-actions">
+        <button
+          className="msg-action"
+          disabled={disabled}
+          onClick={onEdit}
+          title="Edit message"
+          type="button"
+        >
+          <Pencil size={11} />
+          Edit
+        </button>
+        <button
+          className="msg-action"
+          disabled={disabled}
+          onClick={onRedo}
+          title="Redo from here"
+          type="button"
+        >
+          <RotateCw size={11} />
+          Redo
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DataRowEditor({
+  row,
+  fields,
+  onSave,
+  onCancel,
+}: {
+  row: Record<string, unknown>;
+  fields: Record<string, FieldRule>;
+  onSave: (next: Record<string, unknown>) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState<Record<string, unknown>>({ ...row });
+  const [error, setError] = useState("");
+
+  function setField(name: string, value: unknown) {
+    setDraft((current) => ({ ...current, [name]: value }));
+  }
+
+  function submit() {
+    try {
+      onSave({ ...draft, id: row.id });
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid row");
+    }
+  }
+
+  const fieldNames = Object.keys(fields);
+  const extras = Object.keys(row).filter((key) => key !== "id" && !fieldNames.includes(key));
+
+  return (
+    <div className="data-row-editor">
+      <div className="data-fields">
+        <label className="data-field">
+          <span className="label">id</span>
+          <input className="input mono" value={String(row.id)} disabled />
+        </label>
+        {fieldNames.map((name) => {
+          const rule = fields[name];
+          const value = draft[name];
+          if (rule.type === "boolean") {
+            return (
+              <label className="data-field" key={name}>
+                <span className="label">{name}</span>
+                <select
+                  className="select"
+                  value={value === true ? "true" : value === false ? "false" : ""}
+                  onChange={(event) => setField(name, event.target.value === "true")}
+                >
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </label>
+            );
+          }
+          return (
+            <label className="data-field" key={name}>
+              <span className="label">
+                {name}
+                {rule.required ? " *" : ""}
+              </span>
+              <input
+                className="input"
+                type={rule.type === "number" ? "number" : "text"}
+                value={value == null ? "" : String(value)}
+                onChange={(event) =>
+                  setField(
+                    name,
+                    rule.type === "number"
+                      ? event.target.value === ""
+                        ? undefined
+                        : Number(event.target.value)
+                      : event.target.value
+                  )
+                }
+              />
+            </label>
+          );
+        })}
+        {extras.map((name) => (
+          <label className="data-field" key={name}>
+            <span className="label">{name}</span>
+            <input
+              className="input mono"
+              value={draft[name] == null ? "" : JSON.stringify(draft[name])}
+              onChange={(event) => {
+                try {
+                  setField(name, JSON.parse(event.target.value));
+                } catch {
+                  setField(name, event.target.value);
+                }
+              }}
+            />
+          </label>
+        ))}
+      </div>
+      {error && <p className="chat-error" style={{ margin: 0 }}>{error}</p>}
+      <div className="data-row-actions">
+        <button className="btn-ghost" type="button" style={{ minHeight: 26, fontSize: 12 }} onClick={onCancel}>
+          Cancel
+        </button>
+        <button className="btn" type="button" style={{ minHeight: 26, fontSize: 12 }} onClick={submit}>
+          Save
+        </button>
       </div>
     </div>
   );
@@ -209,16 +333,9 @@ function DataAdminPanel({
   const [data, setData] = useState<AppData>({});
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [editingRow, setEditingRow] = useState<{ table: string; id: string } | null>(null);
 
-  const rulesFile = files.find((file) => file.path === "database.rules.json");
-  const rules = useMemo(() => {
-    if (!rulesFile?.content) return null;
-    try {
-      return JSON.parse(rulesFile.content) as { tables?: Record<string, { fields?: Record<string, unknown> }> };
-    } catch {
-      return null;
-    }
-  }, [rulesFile?.content]);
+  const rules = useMemo(() => loadProjectRules(files).rules, [files]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -293,38 +410,49 @@ function DataAdminPanel({
                 {rows.length === 0 ? (
                   <div className="data-row-empty muted">No rows</div>
                 ) : (
-                  rows.map((row) => (
-                    <div className="data-row" key={String(row.id)}>
-                      <pre className="data-row-json">{JSON.stringify(row, null, 2)}</pre>
-                      <div className="data-row-actions">
-                        <button
-                          className="btn-ghost"
-                          type="button"
-                          style={{ minHeight: 26, fontSize: 12 }}
-                          onClick={() => {
-                            const next = prompt("Edit row JSON", JSON.stringify(row, null, 2));
-                            if (!next) return;
-                            try {
-                              void saveRow(table, JSON.parse(next) as Record<string, unknown>);
-                            } catch {
-                              alert("Invalid JSON");
-                            }
-                          }}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="btn-icon btn-danger"
-                          type="button"
-                          style={{ width: 26, minHeight: 26 }}
-                          onClick={() => void deleteRow(table, String(row.id))}
-                          title="Delete row"
-                        >
-                          <Trash2 size={13} />
-                        </button>
+                  rows.map((row) => {
+                    const isEditing =
+                      editingRow?.table === table && editingRow.id === String(row.id);
+                    const tableFields = rules.tables?.[table]?.fields ?? {};
+
+                    return (
+                      <div className="data-row" key={String(row.id)}>
+                        {isEditing ? (
+                          <DataRowEditor
+                            fields={tableFields}
+                            onCancel={() => setEditingRow(null)}
+                            onSave={(next) => {
+                              void saveRow(table, next).then(() => setEditingRow(null));
+                            }}
+                            row={row}
+                          />
+                        ) : (
+                          <>
+                            <pre className="data-row-json">{JSON.stringify(row, null, 2)}</pre>
+                            <div className="data-row-actions">
+                              <button
+                                className="btn-ghost"
+                                type="button"
+                                style={{ minHeight: 26, fontSize: 12 }}
+                                onClick={() => setEditingRow({ table, id: String(row.id) })}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className="btn-icon btn-danger"
+                                type="button"
+                                style={{ width: 26, minHeight: 26 }}
+                                onClick={() => void deleteRow(table, String(row.id))}
+                                title="Delete row"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             )}
@@ -366,21 +494,75 @@ export default function AppWorkspace() {
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [chatError, setChatError] = useState("");
+  const [attachedPaths, setAttachedPaths] = useState<string[]>([]);
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [chatWidth, setChatWidth] = useState(400);
+  const chatWidthRef = useRef(400);
+  const resizingRef = useRef(false);
+  const attachRef = useRef<HTMLDivElement>(null);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const didSendStarter = useRef(false);
   const didLoad = useRef(false);
   const loadingRef = useRef(false);
+  const pollRunRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeRunRef = useRef<string | null>(null);
 
   const errorCount = useMemo(
     () => consoleEntries.filter((entry) => entry.level === "error").length,
     [consoleEntries]
   );
 
-  const hasDatabase = useMemo(
-    () => files.some((file) => file.path === "database.rules.json"),
-    [files]
+  const contextSelection = useMemo(
+    () =>
+      selectFileContext(
+        files.map((file) => ({ path: file.path, content: file.content })),
+        { sessionPaths: attachedPaths }
+      ),
+    [files, attachedPaths]
   );
+
+  useEffect(() => {
+    const stored = localStorage.getItem("aistudio:chat-width");
+    if (stored) {
+      const parsed = Number(stored);
+      if (parsed >= 300 && parsed <= 800) {
+        setChatWidth(parsed);
+        chatWidthRef.current = parsed;
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!attachOpen) return;
+    function onPointerDown(event: MouseEvent) {
+      if (!attachRef.current?.contains(event.target as Node)) setAttachOpen(false);
+    }
+    window.addEventListener("mousedown", onPointerDown);
+    return () => window.removeEventListener("mousedown", onPointerDown);
+  }, [attachOpen]);
+
+  useEffect(() => {
+    function onMove(event: MouseEvent) {
+      if (!resizingRef.current) return;
+      const next = Math.min(720, Math.max(280, event.clientX));
+      chatWidthRef.current = next;
+      setChatWidth(next);
+    }
+    function onUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      localStorage.setItem("aistudio:chat-width", String(chatWidthRef.current));
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
 
   const load = useCallback(async () => {
     const [projectResponse, messagesResponse, filesResponse] = await Promise.all([
@@ -414,9 +596,11 @@ export default function AppWorkspace() {
     function onMessage(event: MessageEvent) {
       const data = event.data;
       if (!data || data.__aistudio !== true || data.type !== "console") return;
+      const text = String(data.text);
+      if (!shouldCaptureConsole(text)) return;
       setConsoleEntries((current) => [
         ...current.slice(-199),
-        { id: ++consoleId, level: String(data.level), text: String(data.text) },
+        { id: ++consoleId, level: String(data.level), text },
       ]);
       if (data.level === "error") setConsoleOpen(true);
     }
@@ -437,6 +621,63 @@ export default function AppWorkspace() {
     setMessages(await messagesResponse.json());
     setFiles(await filesResponse.json());
   }
+
+  const stopFollowingRun = useCallback(() => {
+    if (pollRunRef.current) {
+      clearInterval(pollRunRef.current);
+      pollRunRef.current = null;
+    }
+    activeRunRef.current = null;
+  }, []);
+
+  const applyRunSnapshot = useCallback((run: BuildRunSnapshot) => {
+    setStreamChat(run.streamChat);
+    setBuildEvents(run.events);
+    if (run.status === "running") {
+      setStreamPhase(run.phase === "building" ? "building" : "planning");
+    } else {
+      setStreamPhase("idle");
+    }
+    if (run.error) setChatError(run.error);
+  }, []);
+
+  const followBuildRun = useCallback(
+    async (runId: string) => {
+      stopFollowingRun();
+      activeRunRef.current = runId;
+      loadingRef.current = true;
+      setLoading(true);
+      setChatError("");
+
+      const poll = async () => {
+        if (activeRunRef.current !== runId) return;
+        try {
+          const response = await fetch(`/api/build-runs/${runId}`);
+          if (!response.ok) return;
+          const run = (await response.json()) as BuildRunSnapshot;
+          applyRunSnapshot(run);
+
+          if (run.status !== "running") {
+            stopFollowingRun();
+            loadingRef.current = false;
+            setLoading(false);
+            setStreamChat("");
+            setBuildEvents([]);
+            setStreamPhase("idle");
+            await refreshData();
+            refreshPreview();
+            setTab("preview");
+          }
+        } catch {}
+      };
+
+      await poll();
+      pollRunRef.current = setInterval(() => void poll(), 800);
+    },
+    [applyRunSnapshot, refreshPreview, stopFollowingRun]
+  );
+
+  useEffect(() => () => stopFollowingRun(), [stopFollowingRun]);
 
   async function truncateMessages(fromMessageId: string, includeMessage: boolean) {
     await fetch(
@@ -475,51 +716,28 @@ export default function AppWorkspace() {
             projectId: id,
             content,
             skipUserInsert: options?.skipUserInsert === true,
+            contextPaths: attachedPaths,
           }),
         });
 
-        if (!response.ok || !response.body) {
+        if (!response.ok) {
           const detail = (await response.text()).trim();
           throw new Error(detail || response.statusText);
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let raw = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (value) {
-            raw += decoder.decode(value, { stream: true });
-            const parsed = parseBuilderStream(raw);
-            setStreamChat(parsed.chat);
-            setBuildEvents(parsed.events);
-            if (parsed.planDone || parsed.events.length > 0) {
-              setStreamPhase("building");
-            } else {
-              setStreamPhase("planning");
-            }
-          }
-          if (done) break;
-        }
-
-        setStreamChat("");
-        setBuildEvents([]);
-        setStreamPhase("idle");
-        await refreshData();
-        refreshPreview();
-        setTab("preview");
+        const { runId } = (await response.json()) as { runId: string };
+        await followBuildRun(runId);
       } catch (error) {
+        stopFollowingRun();
         setStreamChat("");
         setBuildEvents([]);
         setStreamPhase("idle");
         setChatError(error instanceof Error ? error.message : "Request failed");
-      } finally {
         loadingRef.current = false;
         setLoading(false);
       }
     },
-    [id, input, refreshPreview]
+    [id, input, followBuildRun, stopFollowingRun, attachedPaths]
   );
 
   async function editMessage(messageId: string, content: string) {
@@ -535,12 +753,28 @@ export default function AppWorkspace() {
   }
 
   useEffect(() => {
-    const starter = searchParams.get("prompt");
-    if (!starter || !loaded || didSendStarter.current || messages.length > 0) return;
-    didSendStarter.current = true;
-    window.history.replaceState(null, "", `/projects/${id}`);
-    void sendMessage(starter);
-  }, [loaded, messages.length, searchParams, id, sendMessage]);
+    if (!loaded) return;
+
+    void (async () => {
+      const activeResponse = await fetch(`/api/build-runs?projectId=${encodeURIComponent(id)}`);
+      const activeRun = activeResponse.ok
+        ? ((await activeResponse.json()) as BuildRunSnapshot | null)
+        : null;
+
+      if (activeRun?.status === "running") {
+        didSendStarter.current = true;
+        window.history.replaceState(null, "", `/projects/${id}`);
+        await followBuildRun(activeRun.id);
+        return;
+      }
+
+      const starter = searchParams.get("prompt");
+      if (!starter || didSendStarter.current || messages.length > 0) return;
+      didSendStarter.current = true;
+      window.history.replaceState(null, "", `/projects/${id}`);
+      void sendMessage(starter);
+    })();
+  }, [loaded, id, messages.length, searchParams, followBuildRun, sendMessage]);
 
   function fixErrors() {
     const errors = consoleEntries
@@ -693,7 +927,7 @@ export default function AppWorkspace() {
         <UserButton />
       </header>
 
-      <div className="ws-body">
+      <div className="ws-body" style={{ gridTemplateColumns: `${chatWidth}px 4px minmax(0, 1fr)` }}>
         <section className="chat-col">
           <div className="messages">
             {messages.length === 0 && !streamChat && !loading && (
@@ -751,10 +985,77 @@ export default function AppWorkspace() {
                 placeholder="Add a dark mode toggle, add a database for todos..."
               />
               <div className="composer-foot">
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {files.length} {files.length === 1 ? "file" : "files"}
-                  {hasDatabase ? " · database" : ""}
-                </span>
+                <div className="composer-context">
+                  <div className="composer-attach" ref={attachRef}>
+                    <button
+                      className="btn-icon"
+                      onClick={() => setAttachOpen((open) => !open)}
+                      title="Attach files to context"
+                      type="button"
+                    >
+                      <Paperclip size={14} />
+                    </button>
+                    {attachOpen && (
+                      <div className="attach-menu">
+                        {files.length === 0 ? (
+                          <div className="attach-empty muted">No files yet</div>
+                        ) : (
+                          files.map((file) => {
+                            const attached = attachedPaths.includes(file.path);
+                            const inContext = contextSelection.includedPaths.includes(file.path);
+                            return (
+                              <button
+                                className={`attach-item ${attached ? "active" : ""}`}
+                                key={file.id}
+                                onClick={() =>
+                                  setAttachedPaths((current) =>
+                                    attached
+                                      ? current.filter((path) => path !== file.path)
+                                      : [...current, file.path]
+                                  )
+                                }
+                                type="button"
+                              >
+                                <FileCode size={12} />
+                                <span>{file.path}</span>
+                                {inContext && !attached ? (
+                                  <span className="attach-tag">auto</span>
+                                ) : null}
+                                {attached ? <span className="attach-tag">attached</span> : null}
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="context-chips">
+                    {contextSelection.includedPaths.length === 0 ? (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        No context loaded
+                      </span>
+                    ) : (
+                      contextSelection.includedPaths.map((path) => (
+                        <span className="context-chip" key={path} title="Included in builder context">
+                          <FileCode size={11} />
+                          {path}
+                          {attachedPaths.includes(path) ? (
+                            <button
+                              className="context-chip-remove"
+                              onClick={() =>
+                                setAttachedPaths((current) => current.filter((item) => item !== path))
+                              }
+                              title="Remove attachment"
+                              type="button"
+                            >
+                              <X size={10} />
+                            </button>
+                          ) : null}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
                 <button className="btn" type="submit" disabled={loading || !input.trim()}>
                   {loading ? (
                     <>
@@ -772,6 +1073,18 @@ export default function AppWorkspace() {
             </div>
           </form>
         </section>
+
+        <div
+          className="ws-resizer"
+          onMouseDown={() => {
+            resizingRef.current = true;
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+          }}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat panel"
+        />
 
         <section className="view-col">
           <div className="tabbar">

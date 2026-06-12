@@ -52,6 +52,20 @@ async function migrate() {
     updated_at INTEGER DEFAULT (unixepoch())
   )`);
   await turso(`CREATE UNIQUE INDEX IF NOT EXISTS files_project_path_idx ON files (project_id, path)`);
+  await turso(`CREATE TABLE IF NOT EXISTS build_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    phase TEXT NOT NULL DEFAULT 'planning',
+    stream_chat TEXT NOT NULL DEFAULT '',
+    events_json TEXT NOT NULL DEFAULT '[]',
+    error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER DEFAULT (unixepoch()),
+    updated_at INTEGER DEFAULT (unixepoch())
+  )`);
+  await turso(
+    `CREATE INDEX IF NOT EXISTS build_runs_project_status_idx ON build_runs (project_id, status, created_at DESC)`
+  );
 
   // Columns added after the original schema; ignore "duplicate column" on existing DBs.
   for (const column of [
