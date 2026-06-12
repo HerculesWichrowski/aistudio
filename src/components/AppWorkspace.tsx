@@ -30,6 +30,7 @@ import {
 import ShareDialog from "./ShareDialog";
 import PageLoader from "./PageLoader";
 import BrandLogo from "./BrandLogo";
+import ModelSelect from "./ModelSelect";
 import { loadProjectRules, type FieldRule } from "@/lib/database";
 import { shouldCaptureConsole } from "@/lib/console-filter";
 import {
@@ -919,19 +920,12 @@ export default function AppWorkspace() {
         <span className="ws-divider" aria-hidden />
         <span className="ws-title">{project.name}</span>
         <span className="ws-spacer" />
-        <select
-          className="select select-minimal"
-          value={project.model}
-          onChange={(event) => changeModel(event.target.value)}
+        <ModelSelect
+          models={project.ai.models}
+          onChange={(model) => void changeModel(model)}
           title="Model"
-        >
-          {project.ai.models.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.name}
-              {model.free ? " · free" : ""}
-            </option>
-          ))}
-        </select>
+          value={project.model}
+        />
         <button
           className="btn-icon"
           onClick={() => {

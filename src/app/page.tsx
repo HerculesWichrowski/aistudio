@@ -6,6 +6,7 @@ import { Show, SignInButton, UserButton, useClerk, useUser } from "@clerk/nextjs
 import { ArrowUp, Globe, Link2, Trash2 } from "lucide-react";
 import { stashPendingPrompt, takePendingModel, takePendingPrompt } from "@/lib/pending-prompt";
 import BrandLogo from "@/components/BrandLogo";
+import ModelSelect from "@/components/ModelSelect";
 
 type Project = {
   id: string;
@@ -164,22 +165,17 @@ export default function Home() {
             placeholder="A flashcard trainer that uses AI to generate cards from any topic I type in..."
           />
           <div className="prompt-card-foot">
-            <select
-              className="select select-minimal"
-              value={selectedModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
-              title="Builder model"
+            <ModelSelect
               disabled={creating || models.length === 0}
-            >
-              {(models.length > 0 ? models : [{ id: selectedModel, name: "Free (auto free models)", free: true }]).map(
-                (model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name}
-                    {model.free ? " · free" : ""}
-                  </option>
-                )
-              )}
-            </select>
+              models={
+                models.length > 0
+                  ? models
+                  : [{ id: selectedModel, name: "Free (auto free models)", free: true }]
+              }
+              onChange={setSelectedModel}
+              title="Builder model"
+              value={selectedModel}
+            />
             <button className="btn" type="submit" disabled={creating || !prompt.trim()}>
               {creating ? "Creating…" : "Build"}
               <ArrowUp size={14} />

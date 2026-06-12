@@ -176,14 +176,62 @@ button:disabled {
 
 .select-minimal {
   border: 0;
-  background: transparent;
+  background-color: transparent;
   padding: 4px 14px 4px 0;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b8b92' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
   background-position: right 0 center;
   box-shadow: none;
   flex-shrink: 0;
   width: auto;
   max-width: min(420px, 70vw);
+}
+
+.model-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  max-width: min(420px, 70vw);
+}
+
+.model-select-input {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: transparent;
+  margin: 0;
+  padding: 0 14px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+  cursor: pointer;
+  outline: none;
+  max-width: 100%;
+}
+
+.model-select-input:hover:not(:disabled),
+.model-select:focus-within .model-select-input {
+  color: var(--ink);
+}
+
+.model-select-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.model-select-icon {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--muted);
+}
+
+.model-select:hover .model-select-icon,
+.model-select:focus-within .model-select-icon {
+  color: var(--ink);
 }
 
 .select-minimal:focus {
