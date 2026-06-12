@@ -868,6 +868,21 @@ button:disabled {
   background: rgb(244 97 92 / 0.08);
 }
 
+.chip-button {
+  cursor: pointer;
+  font: inherit;
+}
+
+.chip-button:hover {
+  filter: brightness(1.08);
+}
+
+.composer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* data tab */
 
 .data-empty {

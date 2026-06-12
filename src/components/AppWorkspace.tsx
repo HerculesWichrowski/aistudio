@@ -23,6 +23,7 @@ import {
   Save,
   Settings2,
   Share2,
+  Square,
   Trash2,
   Wrench,
   X,
@@ -42,7 +43,7 @@ import {
 type BuildRunSnapshot = {
   id: string;
   projectId: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "cancelled";
   phase: "planning" | "building" | "idle";
   streamChat: string;
   events: BuildFileStatus[];
@@ -86,14 +87,16 @@ function FileChip({
   status,
   error,
   deleted,
+  onOpen,
 }: {
   path: string;
   status: BuildFileStatus["status"] | StoredFileOp["status"];
   error?: string;
   deleted?: boolean;
+  onOpen?: (path: string) => void;
 }) {
-  return (
-    <span className={chipClassForStatus(status)} title={error}>
+  const label = (
+    <>
       {status === "start" ? (
         <Loader2 size={11} className="chip-spinner" />
       ) : (
@@ -102,7 +105,26 @@ function FileChip({
       {deleted ? "removed " : ""}
       {path}
       {status === "error" ? ` (${error ?? "failed"})` : ""}
-    </span>
+    </>
+  );
+
+  if (!onOpen || deleted) {
+    return (
+      <span className={chipClassForStatus(status)} title={error}>
+        {label}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      className={`${chipClassForStatus(status)} chip-button`}
+      onClick={() => onOpen(path)}
+      title={error ?? `Open ${path}`}
+      type="button"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -111,11 +133,13 @@ function AssistantMessage({
   streaming,
   buildEvents = [],
   phase = "idle",
+  onFileClick,
 }: {
   content: string;
   streaming?: boolean;
   buildEvents?: BuildFileStatus[];
   phase?: "idle" | "planning" | "building";
+  onFileClick?: (path: string) => void;
 }) {
   const parsed = useMemo(() => parseStoredFileOps(content), [content]);
   const text = parsed.text;
@@ -150,6 +174,7 @@ function AssistantMessage({
               deleted={item.deleted}
               error={item.error}
               key={item.key}
+              onOpen={onFileClick}
               path={item.path}
               status={item.status}
             />
@@ -509,6 +534,8 @@ export default function AppWorkspace() {
   const loadingRef = useRef(false);
   const pollRunRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeRunRef = useRef<string | null>(null);
+  const buildFocusPathRef = useRef<string | null>(null);
+  const prevEventStatusRef = useRef<Map<string, string>>(new Map());
 
   const errorCount = useMemo(
     () => consoleEntries.filter((entry) => entry.level === "error").length,
@@ -646,7 +673,92 @@ export default function AppWorkspace() {
       pollRunRef.current = null;
     }
     activeRunRef.current = null;
+    buildFocusPathRef.current = null;
+    prevEventStatusRef.current = new Map();
   }, []);
+
+  const showFileInEditor = useCallback((path: string, content: string) => {
+    setTab("code");
+    setSelectedPath(path);
+    setDraftPath(path);
+    setDraftContent(content);
+    setFiles((current) => {
+      const index = current.findIndex((file) => file.path === path);
+      if (index >= 0) {
+        const next = [...current];
+        next[index] = { ...next[index], content };
+        return next;
+      }
+      return [...current, { id: path, path, content }].sort((a, b) =>
+        a.path.localeCompare(b.path)
+      );
+    });
+  }, []);
+
+  const openFileFromPath = useCallback(
+    async (path: string) => {
+      buildFocusPathRef.current = path;
+      const live = buildEvents.find((event) => event.path === path);
+      if (live?.draft !== undefined) {
+        showFileInEditor(path, live.draft);
+        return;
+      }
+      const local = files.find((file) => file.path === path);
+      if (local) {
+        showFileInEditor(path, local.content);
+        return;
+      }
+      const response = await fetch(`/api/files?projectId=${id}`);
+      if (!response.ok) return;
+      const allFiles = (await response.json()) as ProjectFile[];
+      setFiles(allFiles);
+      const match = allFiles.find((file) => file.path === path);
+      if (match) showFileInEditor(path, match.content);
+    },
+    [buildEvents, files, id, showFileInEditor]
+  );
+
+  const syncRunEventsToEditor = useCallback(
+    async (events: BuildFileStatus[]) => {
+      const focus = buildFocusPathRef.current;
+      let target: BuildFileStatus | undefined;
+
+      if (focus) {
+        target = events.find((event) => event.path === focus && event.status !== "deleted");
+      }
+
+      if (!target) {
+        target =
+          [...events]
+            .reverse()
+            .find((event) => event.status === "start" && event.draft !== undefined) ??
+          [...events]
+            .reverse()
+            .find((event) => {
+              const prev = prevEventStatusRef.current.get(event.path);
+              return event.status === "done" && prev !== "done";
+            }) ??
+          [...events].reverse().find((event) => event.status === "start");
+      }
+
+      if (!target || target.status === "deleted") return;
+
+      if (target.draft !== undefined) {
+        showFileInEditor(target.path, target.draft);
+        return;
+      }
+
+      if (target.status === "done") {
+        const response = await fetch(`/api/files?projectId=${id}`);
+        if (!response.ok) return;
+        const allFiles = (await response.json()) as ProjectFile[];
+        setFiles(allFiles);
+        const match = allFiles.find((file) => file.path === target.path);
+        if (match) showFileInEditor(match.path, match.content);
+      }
+    },
+    [id, showFileInEditor]
+  );
 
   const applyRunSnapshot = useCallback((run: BuildRunSnapshot) => {
     setStreamChat(run.streamChat);
@@ -656,7 +768,30 @@ export default function AppWorkspace() {
     } else {
       setStreamPhase("idle");
     }
-    if (run.error) setChatError(run.error);
+    if (run.error && run.status !== "cancelled") setChatError(run.error);
+    if (run.status === "cancelled") setChatError("");
+  }, []);
+
+  const finishBuildRun = useCallback(async () => {
+    stopFollowingRun();
+    loadingRef.current = false;
+    setLoading(false);
+    setStreamChat("");
+    setBuildEvents([]);
+    setStreamPhase("idle");
+    await refreshData();
+    refreshPreview();
+    setTab((current) => (current === "code" ? "code" : "preview"));
+  }, [refreshData, refreshPreview, stopFollowingRun]);
+
+  const stopRun = useCallback(async () => {
+    const runId = activeRunRef.current;
+    if (!runId) return;
+    try {
+      await fetch(`/api/build-runs/${runId}`, { method: "DELETE" });
+    } catch {
+      setChatError("Could not stop the build");
+    }
   }, []);
 
   const followBuildRun = useCallback(
@@ -666,6 +801,7 @@ export default function AppWorkspace() {
       loadingRef.current = true;
       setLoading(true);
       setChatError("");
+      prevEventStatusRef.current = new Map();
 
       const poll = async () => {
         if (activeRunRef.current !== runId) return;
@@ -675,24 +811,24 @@ export default function AppWorkspace() {
           const run = (await response.json()) as BuildRunSnapshot;
           applyRunSnapshot(run);
 
+          if (run.phase === "building" && run.events.length > 0) {
+            await syncRunEventsToEditor(run.events);
+          }
+
+          for (const event of run.events) {
+            prevEventStatusRef.current.set(event.path, event.status);
+          }
+
           if (run.status !== "running") {
-            stopFollowingRun();
-            loadingRef.current = false;
-            setLoading(false);
-            setStreamChat("");
-            setBuildEvents([]);
-            setStreamPhase("idle");
-            await refreshData();
-            refreshPreview();
-            setTab("preview");
+            await finishBuildRun();
           }
         } catch {}
       };
 
       await poll();
-      pollRunRef.current = setInterval(() => void poll(), 800);
+      pollRunRef.current = setInterval(() => void poll(), 450);
     },
-    [applyRunSnapshot, refreshPreview, stopFollowingRun]
+    [applyRunSnapshot, finishBuildRun, stopFollowingRun, syncRunEventsToEditor]
   );
 
   useEffect(() => () => stopFollowingRun(), [stopFollowingRun]);
@@ -965,13 +1101,18 @@ export default function AppWorkspace() {
                   onRedo={() => void redoMessage(message.id, message.content)}
                 />
               ) : (
-                <AssistantMessage content={message.content} key={message.id} />
+                <AssistantMessage
+                  content={message.content}
+                  key={message.id}
+                  onFileClick={(path) => void openFileFromPath(path)}
+                />
               )
             )}
             {loading && (
               <AssistantMessage
                 buildEvents={buildEvents}
                 content={streamChat}
+                onFileClick={(path) => void openFileFromPath(path)}
                 phase={streamPhase}
                 streaming={streamPhase === "planning"}
               />
@@ -1042,11 +1183,22 @@ export default function AppWorkspace() {
                     <Paperclip size={14} />
                   </button>
                 </div>
-                <button
-                  className="btn"
-                  type="submit"
-                  disabled={loading || (!input.trim() && attachments.length === 0)}
-                >
+                <div className="composer-actions">
+                  {loading && (
+                    <button
+                      className="btn-ghost btn-danger"
+                      onClick={() => void stopRun()}
+                      type="button"
+                    >
+                      <Square size={12} />
+                      Stop
+                    </button>
+                  )}
+                  <button
+                    className="btn"
+                    type="submit"
+                    disabled={loading || (!input.trim() && attachments.length === 0)}
+                  >
                   {loading ? (
                     <>
                       <Loader2 size={14} className="chip-spinner" />
@@ -1058,7 +1210,8 @@ export default function AppWorkspace() {
                       <ArrowUp size={14} />
                     </>
                   )}
-                </button>
+                  </button>
+                </div>
               </div>
             </div>
           </form>

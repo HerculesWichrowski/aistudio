@@ -5,12 +5,13 @@ export type BuildRunEvent = {
   path: string;
   status: "start" | "done" | "deleted" | "error";
   error?: string;
+  draft?: string;
 };
 
 export type BuildRun = {
   id: string;
   project_id: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "cancelled";
   phase: "planning" | "building" | "idle";
   stream_chat: string;
   events_json: string;
@@ -123,7 +124,23 @@ export async function patchBuildRun(
 export function mergeBuildEvent(events: BuildRunEvent[], event: BuildRunEvent) {
   const next = [...events];
   const index = next.findIndex((entry) => entry.path === event.path);
-  if (index >= 0) next[index] = { ...next[index], ...event };
-  else next.push(event);
+  if (index >= 0) {
+    const merged = { ...next[index], ...event };
+    if (event.draft === undefined && next[index].draft && event.status !== "start") {
+      delete merged.draft;
+    }
+    next[index] = merged;
+  } else {
+    next.push(event);
+  }
   return next;
+}
+
+export async function isRunCancelled(runId: string) {
+  const run = await getBuildRun(runId);
+  return !run || run.status === "cancelled";
+}
+
+export async function cancelBuildRun(runId: string) {
+  await patchBuildRun(runId, { status: "cancelled", phase: "idle", error: "Stopped" });
 }

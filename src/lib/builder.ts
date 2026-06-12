@@ -408,6 +408,16 @@ export function extractFileOperations(text: string) {
   return operations.filter((op) => op.path && safePath(op.path));
 }
 
+/** Best-effort partial file body while the model is still streaming a fence. */
+export function extractPartialFileContent(text: string, path: string) {
+  const marker = `\`\`\`file:${path}\n`;
+  const index = text.indexOf(marker);
+  if (index === -1) return null;
+  const start = index + marker.length;
+  const close = text.indexOf("\n```", start);
+  return close === -1 ? text.slice(start) : text.slice(start, close);
+}
+
 /** Strip hidden plan blocks and any trailing partial fences while streaming. */
 export function stripVisiblePlanText(text: string) {
   let result = text.replace(/```build_plan\s*[\s\S]*?```/g, "");
@@ -488,7 +498,8 @@ async function chatCompletion(
 export async function streamCompletion(
   project: Project,
   messages: ChatMessage[],
-  onDelta: (text: string) => void
+  onDelta: (text: string) => void,
+  options?: { shouldAbort?: () => boolean | Promise<boolean> }
 ) {
   const upstream = await chatCompletion(project, messages, true);
   if (!upstream.ok || !upstream.body) {
@@ -501,6 +512,11 @@ export async function streamCompletion(
   let fullText = "";
 
   while (true) {
+    if (options?.shouldAbort && (await options.shouldAbort())) {
+      await reader.cancel().catch(() => {});
+      break;
+    }
+
     const { done, value } = await reader.read();
     if (done) break;
 
@@ -562,7 +578,8 @@ export async function generatePlan(
   project: Project,
   files: VirtualFile[],
   history: ChatMessage[],
-  onVisibleDelta: (visibleChunk: string) => void
+  onVisibleDelta: (visibleChunk: string) => void,
+  options?: { shouldAbort?: () => boolean | Promise<boolean> }
 ) {
   let raw = "";
   let lastVisible = "";
@@ -576,7 +593,8 @@ export async function generatePlan(
       const chunk = visible.slice(lastVisible.length);
       if (chunk) onVisibleDelta(chunk);
       lastVisible = visible;
-    }
+    },
+    { shouldAbort: options?.shouldAbort }
   );
 
   return raw;
@@ -588,7 +606,11 @@ export async function generateFile(
   history: ChatMessage[],
   path: string,
   plan: BuildPlan,
-  sessionPaths: string[]
+  sessionPaths: string[],
+  options?: {
+    onRawDelta?: (raw: string) => void;
+    shouldAbort?: () => boolean | Promise<boolean>;
+  }
 ) {
   const instruction = [
     `Implement ONLY the file "${path}".`,
@@ -618,14 +640,27 @@ export async function generateFile(
   messages.push({ role: "user", content: instruction });
 
   const maxTokens = path === "app.js" ? 16_384 : 8_192;
-  let text = await completeOnce(project, messages, { maxTokens });
-  let ops = extractFileOperations(text).filter((op) => op.path === path);
+  let raw = "";
+  await streamCompletion(
+    project,
+    messages,
+    (delta) => {
+      raw += delta;
+      options?.onRawDelta?.(raw);
+    },
+    { shouldAbort: options?.shouldAbort }
+  );
+
+  let ops = extractFileOperations(raw).filter((op) => op.path === path);
   if (ops[0]) return ops[0];
 
+  if (options?.shouldAbort && (await options.shouldAbort())) return null;
+
   // One retry — large JS files often truncate or omit the closing fence.
-  text = await completeOnce(project, messages, { maxTokens });
-  ops = extractFileOperations(text).filter((op) => op.path === path);
-  return ops[0] ?? extractFileOperations(text)[0] ?? null;
+  raw = await completeOnce(project, messages, { maxTokens });
+  options?.onRawDelta?.(raw);
+  ops = extractFileOperations(raw).filter((op) => op.path === path);
+  return ops[0] ?? extractFileOperations(raw)[0] ?? null;
 }
 
 export { PLAN_PROMPT, FILE_PROMPT, BASE_SYSTEM };

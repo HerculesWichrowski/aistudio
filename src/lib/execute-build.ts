@@ -9,6 +9,7 @@ import {
 } from "./projects";
 import {
   emitEvent,
+  extractPartialFileContent,
   formatAssistantReply,
   generateFile,
   generatePlan,
@@ -20,6 +21,7 @@ import {
 } from "./builder";
 import {
   getBuildRun,
+  isRunCancelled,
   mergeBuildEvent,
   patchBuildRun,
   type BuildRunEvent,
@@ -55,6 +57,7 @@ export async function executeBuildRun(runId: string, project: Project, userReque
   let streamChat = "";
   let events: BuildRunEvent[] = [];
   let phase: "planning" | "building" | "idle" = "planning";
+  let lastDraftPersist = 0;
 
   async function persist(extra?: Parameters<typeof patchBuildRun>[1]) {
     await patchBuildRun(runId, {
@@ -63,6 +66,13 @@ export async function executeBuildRun(runId: string, project: Project, userReque
       phase,
       ...extra,
     });
+  }
+
+  async function abortIfCancelled() {
+    if (!(await isRunCancelled(runId))) return false;
+    phase = "idle";
+    await persist({ status: "cancelled" });
+    return true;
   }
 
   const send = (text: string) => {
@@ -76,6 +86,8 @@ export async function executeBuildRun(runId: string, project: Project, userReque
   };
 
   try {
+    if (await abortIfCancelled()) return;
+
     const messages = await listMessages(projectId);
     const files = (await listFiles(projectId)) as unknown as VirtualFile[];
 
@@ -89,11 +101,19 @@ export async function executeBuildRun(runId: string, project: Project, userReque
     await persist();
 
     let planBuffer = "";
-    const planRaw = await generatePlan(project, files, builderHistory, (chunk) => {
-      planBuffer += chunk;
-      streamChat = stripVisiblePlanText(planBuffer);
-      void persist();
-    });
+    const planRaw = await generatePlan(
+      project,
+      files,
+      builderHistory,
+      (chunk) => {
+        planBuffer += chunk;
+        streamChat = stripVisiblePlanText(planBuffer);
+        void persist();
+      },
+      { shouldAbort: () => isRunCancelled(runId) }
+    );
+
+    if (await abortIfCancelled()) return;
 
     streamChat = stripVisiblePlanText(planRaw);
     await persist();
@@ -110,6 +130,8 @@ export async function executeBuildRun(runId: string, project: Project, userReque
       return;
     }
 
+    if (await abortIfCancelled()) return;
+
     send(emitEvent({ type: "plan_done" }));
     phase = "building";
     await persist();
@@ -125,6 +147,7 @@ export async function executeBuildRun(runId: string, project: Project, userReque
     await persist();
 
     for (const path of deletePaths) {
+      if (await abortIfCancelled()) return;
       await deleteFile(projectId, path);
       send(emitEvent({ type: "file", status: "deleted", path }));
       currentFiles = currentFiles.filter((file) => file.path !== path);
@@ -134,6 +157,8 @@ export async function executeBuildRun(runId: string, project: Project, userReque
     const fileResults: { path: string; ok: boolean }[] = [];
 
     for (const path of upsertPaths) {
+      if (await abortIfCancelled()) return;
+
       try {
         const op = await generateFile(
           project,
@@ -141,8 +166,24 @@ export async function executeBuildRun(runId: string, project: Project, userReque
           builderHistory,
           path,
           plan,
-          [...sessionPaths]
+          [...sessionPaths],
+          {
+            shouldAbort: () => isRunCancelled(runId),
+            onRawDelta: (raw) => {
+              const draft = extractPartialFileContent(raw, path);
+              if (draft === null) return;
+              events = mergeBuildEvent(events, { path, status: "start", draft });
+              const now = Date.now();
+              if (now - lastDraftPersist > 350) {
+                lastDraftPersist = now;
+                void persist();
+              }
+            },
+          }
         );
+
+        if (await abortIfCancelled()) return;
+
         if (op?.path && op.action !== "delete") {
           await upsertFile(projectId, op.path, op.content ?? "");
           mergeSessionPaths(sessionPaths, [op.path]);
@@ -151,6 +192,8 @@ export async function executeBuildRun(runId: string, project: Project, userReque
           currentFiles = next;
           send(emitEvent({ type: "file", status: "done", path: op.path }));
           fileResults.push({ path: op.path, ok: true });
+        } else if (await isRunCancelled(runId)) {
+          return;
         } else {
           send(emitEvent({
             type: "file",
@@ -161,12 +204,15 @@ export async function executeBuildRun(runId: string, project: Project, userReque
           fileResults.push({ path, ok: false });
         }
       } catch (error) {
+        if (await isRunCancelled(runId)) return;
         const message = error instanceof Error ? error.message : "Generation failed";
         send(emitEvent({ type: "file", status: "error", path, error: message }));
         fileResults.push({ path, ok: false });
       }
       await persist();
     }
+
+    if (await abortIfCancelled()) return;
 
     const succeeded = fileResults.filter((entry) => entry.ok).map((entry) => entry.path);
     const failed = fileResults.filter((entry) => !entry.ok).map((entry) => entry.path);
@@ -184,6 +230,7 @@ export async function executeBuildRun(runId: string, project: Project, userReque
     phase = "idle";
     await persist({ status: "done" });
   } catch (error) {
+    if (await isRunCancelled(runId)) return;
     const message = error instanceof Error ? error.message : "Build failed";
     phase = "idle";
     await persist({ status: "error", error: message });

@@ -4,6 +4,7 @@ export type BuildFileStatus = {
   path: string;
   status: "start" | "done" | "deleted" | "error";
   error?: string;
+  draft?: string;
 };
 
 export type StoredFileOp = {
