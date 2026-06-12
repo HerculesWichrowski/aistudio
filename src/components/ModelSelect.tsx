@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 export type ModelOption = { id: string; name: string; free?: boolean };
@@ -10,11 +11,8 @@ type ModelSelectProps = {
   models: ModelOption[];
   disabled?: boolean;
   title?: string;
+  menuPlacement?: "up" | "down";
 };
-
-function modelLabel(model: ModelOption) {
-  return model.name;
-}
 
 export default function ModelSelect({
   value,
@@ -22,27 +20,65 @@ export default function ModelSelect({
   models,
   disabled,
   title = "Model",
+  menuPlacement = "down",
 }: ModelSelectProps) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const selected = models.find((model) => model.id === value);
-  const displayText = selected ? modelLabel(selected) : value;
+  const displayText = selected?.name ?? value;
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   return (
-    <label className="model-select">
-      <select
-        className="model-select-input"
+    <div className="model-select" ref={rootRef}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className="model-select-trigger"
         disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        style={{ width: `${Math.max(displayText.length - 6, 2)}ch` }}
+        onClick={() => setOpen((current) => !current)}
         title={title}
-        value={value}
+        type="button"
       >
-        {models.map((model) => (
-          <option key={model.id} value={model.id}>
-            {modelLabel(model)}
-          </option>
-        ))}
-      </select>
-      <ChevronDown aria-hidden className="model-select-icon" size={12} />
-    </label>
+        <span className="model-select-label">{displayText}</span>
+        <ChevronDown aria-hidden className={`model-select-icon ${open ? "open" : ""}`} size={12} />
+      </button>
+      {open && (
+        <div
+          className={`model-select-menu ${menuPlacement === "up" ? "up" : "down"}`}
+          role="listbox"
+        >
+          {models.map((model) => (
+            <button
+              aria-selected={model.id === value}
+              className={`model-select-option ${model.id === value ? "active" : ""}`}
+              key={model.id}
+              onClick={() => {
+                onChange(model.id);
+                setOpen(false);
+              }}
+              role="option"
+              type="button"
+            >
+              {model.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

@@ -167,6 +167,7 @@ export default function Home() {
           <div className="prompt-card-foot">
             <ModelSelect
               disabled={creating || models.length === 0}
+              menuPlacement="up"
               models={
                 models.length > 0
                   ? models
