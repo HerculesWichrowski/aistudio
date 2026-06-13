@@ -6,7 +6,9 @@ type VirtualFile = { path: string; content: string };
  * Runtime injected into every served app:
  * - forwards console output / errors to the parent workspace via postMessage
  * - provides `window.ai.chat()` backed by this platform's OpenRouter key
+ * - provides `window.db` CRUD against the project's built-in database
  * - shims localStorage/sessionStorage (apps run in a sandboxed, opaque origin)
+ * - inspect mode: lets the workspace select an element for targeted edits
  */
 function runtimeScript(origin: string, projectId: string) {
   return `<script>
@@ -85,6 +87,87 @@ function runtimeScript(origin: string, projectId: string) {
     update: function (table, id, patch) { return dbCall("update", table, { id: id, patch: patch }); },
     delete: function (table, id) { return dbCall("delete", table, { id: id }); }
   };
+
+  // Inspect mode: the workspace toggles it on, the user clicks an element,
+  // and a small descriptor (component tag + clicked element) is sent back so
+  // the builder can target the right file.
+  (function () {
+    var overlay = null;
+    var active = false;
+
+    function pathTarget(e) {
+      var path = (e.composedPath && e.composedPath()) || [e.target];
+      for (var i = 0; i < path.length; i++) {
+        if (path[i] && path[i].nodeType === 1) return path[i];
+      }
+      return null;
+    }
+    function hostComponent(e) {
+      var path = (e.composedPath && e.composedPath()) || [e.target];
+      for (var i = 0; i < path.length; i++) {
+        var n = path[i];
+        if (n && n.nodeType === 1 && n.tagName && n.tagName.indexOf("-") !== -1) {
+          return n.tagName.toLowerCase();
+        }
+      }
+      return null;
+    }
+    function onMove(e) {
+      var el = pathTarget(e);
+      if (!el || !overlay) return;
+      var r = el.getBoundingClientRect();
+      overlay.style.display = "block";
+      overlay.style.left = r.left + "px";
+      overlay.style.top = r.top + "px";
+      overlay.style.width = r.width + "px";
+      overlay.style.height = r.height + "px";
+    }
+    function onClick(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var el = pathTarget(e);
+      if (!el) return;
+      var text = (el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 80);
+      try {
+        parent.postMessage({
+          __aistudio: true,
+          type: "inspected",
+          target: {
+            component: hostComponent(e),
+            tag: el.tagName ? el.tagName.toLowerCase() : "",
+            id: el.id || "",
+            classes: el.className && typeof el.className === "string" ? el.className : "",
+            text: text
+          }
+        }, "*");
+      } catch (err) {}
+      setInspect(false);
+    }
+    function setInspect(on) {
+      if (on === active) return;
+      active = on;
+      if (on) {
+        overlay = document.createElement("div");
+        overlay.style.cssText = "position:fixed;z-index:2147483647;pointer-events:none;display:none;" +
+          "background:rgba(135,25,255,0.14);outline:2px solid rgba(135,25,255,0.9);border-radius:3px;";
+        document.documentElement.appendChild(overlay);
+        document.documentElement.style.cursor = "crosshair";
+        window.addEventListener("mousemove", onMove, true);
+        window.addEventListener("click", onClick, true);
+      } else {
+        if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        overlay = null;
+        document.documentElement.style.cursor = "";
+        window.removeEventListener("mousemove", onMove, true);
+        window.removeEventListener("click", onClick, true);
+      }
+    }
+    window.addEventListener("message", function (e) {
+      var data = e.data;
+      if (!data || data.__aistudio !== true || data.type !== "inspect") return;
+      setInspect(!!data.enabled);
+    });
+  })();
 })();
 </script>`;
 }

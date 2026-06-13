@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { initDB } from "@/lib/db";
-import { DATABASE_RULES_PATH, loadProjectRules, runDataOperation } from "@/lib/database";
+import { loadProjectRules, runDataOperation } from "@/lib/database";
 import { getProject, listFiles } from "@/lib/projects";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -26,6 +27,14 @@ export async function POST(req: NextRequest) {
   const { projectId, action, table, id, row, patch } = body;
   if (!projectId || !action) {
     return new Response("Expected { projectId, action }", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const limited = rateLimit(`db:${projectId}:${clientIp(req)}`, 120, 60_000);
+  if (!limited.ok) {
+    return new Response("Too many database requests — slow down and retry shortly", {
+      status: 429,
+      headers: { ...CORS_HEADERS, "Retry-After": String(limited.retryAfterSec) },
+    });
   }
 
   const project = await getProject(projectId);

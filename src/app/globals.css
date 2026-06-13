@@ -1125,7 +1125,7 @@ button:disabled {
 
 .code-layout {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: 240px 1fr;
   height: 100%;
   min-height: 0;
 }
@@ -1138,6 +1138,20 @@ button:disabled {
   border-right: 1px solid var(--line);
   overflow-y: auto;
   background: var(--panel);
+  min-width: 0;
+}
+
+.file-tree-row {
+  width: 100%;
+}
+
+.file-tree-folder {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.file-tree-folder span {
+  font-family: var(--sans, ui-sans-serif, system-ui, sans-serif);
 }
 
 .file-row {
@@ -1321,6 +1335,149 @@ button:disabled {
 @keyframes pulse {
   0%, 100% { opacity: 0.25; transform: translateY(0); }
   50% { opacity: 1; transform: translateY(-2px); }
+}
+
+/* preview device stage */
+
+.preview-stage {
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  background: var(--bg);
+}
+
+.preview-stage .preview-frame {
+  height: 100%;
+}
+
+.preview-stage.desktop .preview-frame {
+  width: 100%;
+}
+
+.preview-stage.tablet .preview-frame,
+.preview-stage.phone .preview-frame {
+  border-inline: 1px solid var(--line-strong);
+}
+
+.preview-stage.tablet .preview-frame {
+  width: 768px;
+  max-width: 100%;
+}
+
+.preview-stage.phone .preview-frame {
+  width: 390px;
+  max-width: 100%;
+}
+
+/* toggled icon buttons (inspect, device widths) */
+
+.btn-icon.on {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  border-color: var(--accent-glow);
+}
+
+/* inline rename in the workspace topbar */
+
+.ws-title-btn {
+  text-align: left;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 7px;
+  border-radius: 6px;
+}
+
+.ws-title-btn:hover {
+  background: var(--panel-2);
+}
+
+.ws-title-input {
+  width: 240px;
+  padding: 3px 7px;
+  font-size: 13px;
+}
+
+/* inspect-mode chip in the composer */
+
+.upload-attachment.inspect-chip {
+  border-color: var(--accent-glow);
+  color: var(--accent-hover);
+  background: var(--accent-soft);
+}
+
+/* version history dialog */
+
+.modal-wide {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.history-row + .history-row {
+  border-top: 1px solid var(--line);
+}
+
+.history-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+  font-size: 12.5px;
+}
+
+.history-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta .muted {
+  font-size: 11.5px;
+}
+
+/* starter prompt chips on the home page */
+
+.starter-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.starter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12.5px;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.starter-chip:hover:not(:disabled) {
+  border-color: var(--accent-glow);
+  color: var(--ink);
 }
 
 /* responsive */

@@ -9,7 +9,18 @@ import { addMessage } from "@/lib/projects";
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  const { projectId, content, skipUserInsert, attachments } = await req.json();
+  let parsed: {
+    projectId?: string;
+    content?: string;
+    skipUserInsert?: boolean;
+    attachments?: unknown;
+  };
+  try {
+    parsed = await req.json();
+  } catch {
+    return new Response("Invalid JSON body", { status: 400 });
+  }
+  const { projectId, content, skipUserInsert, attachments } = parsed;
 
   const safeAttachments: ChatAttachment[] = Array.isArray(attachments)
     ? attachments

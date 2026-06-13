@@ -3,11 +3,6 @@ import { DEFAULT_MODEL, type Project } from "./projects";
 export const AUTO_ROUTER = "openrouter/auto";
 export const FREE_ROUTER = "openrouter/free";
 
-export const ROUTERS = [
-  { id: AUTO_ROUTER, name: "Auto" },
-  { id: FREE_ROUTER, name: "Auto" },
-] as const;
-
 type OpenRouterModel = {
   id: string;
   name?: string;

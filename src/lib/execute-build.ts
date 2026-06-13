@@ -1,4 +1,17 @@
+import { generateFile, generatePlan, resolveBuildPlan } from "./builder";
 import { mergeSessionPaths } from "./context";
+import { findMissingLocalImports } from "./imports";
+import { safePath } from "./paths";
+import {
+  extractPartialFileContent,
+  formatAssistantReply,
+  planSummaryText,
+  planHasChanges,
+  sanitizeHistoryForBuilder,
+  sortGenerationPaths,
+  stripVisiblePlanText,
+  type FileOperation,
+} from "./plan";
 import {
   addMessage,
   deleteFile,
@@ -7,47 +20,20 @@ import {
   upsertFile,
   type Project,
 } from "./projects";
-import {
-  emitEvent,
-  extractPartialFileContent,
-  formatAssistantReply,
-  generateFile,
-  generatePlan,
-  planSummaryText,
-  resolveBuildPlan,
-  sanitizeHistoryForBuilder,
-  sortGenerationPaths,
-  stripVisiblePlanText,
-} from "./builder";
+import { validateGeneratedFile } from "./validate";
 import {
   getBuildRun,
   isRunCancelled,
   mergeBuildEvent,
   patchBuildRun,
+  saveRunFilesSnapshot,
   type BuildRunEvent,
 } from "./build-runs";
 
 type VirtualFile = { path: string; content: string };
 
-function parseStreamEvent(line: string): BuildRunEvent | null {
-  if (!line.startsWith("\n@@")) return null;
-  try {
-    const event = JSON.parse(line.slice(3).trim()) as {
-      type?: string;
-      status?: string;
-      path?: string;
-      error?: string;
-    };
-    if (event.type === "file" && event.path && event.status) {
-      return {
-        path: event.path,
-        status: event.status as BuildRunEvent["status"],
-        error: event.error,
-      };
-    }
-  } catch {}
-  return null;
-}
+/** Extra modules generated when files import @app/ paths that don't exist. */
+const MAX_AUTO_MODULES = 3;
 
 export async function executeBuildRun(runId: string, project: Project, userRequest: string) {
   const run = await getBuildRun(runId);
@@ -75,14 +61,8 @@ export async function executeBuildRun(runId: string, project: Project, userReque
     return true;
   }
 
-  const send = (text: string) => {
-    if (!text.startsWith("\n@@")) {
-      streamChat = stripVisiblePlanText(streamChat + text);
-      return;
-    }
-    const event = parseStreamEvent(text);
-    if (event) events = mergeBuildEvent(events, event);
-    if (text.includes('"type":"plan_done"')) phase = "building";
+  const recordEvent = (event: BuildRunEvent) => {
+    events = mergeBuildEvent(events, event);
   };
 
   try {
@@ -110,7 +90,7 @@ export async function executeBuildRun(runId: string, project: Project, userReque
         streamChat = stripVisiblePlanText(planBuffer);
         void persist();
       },
-      { shouldAbort: () => isRunCancelled(runId) }
+      { shouldAbort: () => isRunCancelled(runId), userRequest }
     );
 
     if (await abortIfCancelled()) return;
@@ -121,7 +101,7 @@ export async function executeBuildRun(runId: string, project: Project, userReque
     const plan = await resolveBuildPlan(project, files, builderHistory, planRaw, userRequest);
     const summary = planSummaryText(planRaw);
 
-    if (!plan || ((!plan.upsert?.length) && (!plan.delete?.length))) {
+    if (!planHasChanges(plan)) {
       if (summary.trim()) {
         await addMessage(projectId, "assistant", summary.trim());
       }
@@ -132,7 +112,9 @@ export async function executeBuildRun(runId: string, project: Project, userReque
 
     if (await abortIfCancelled()) return;
 
-    send(emitEvent({ type: "plan_done" }));
+    // Checkpoint the pre-build file tree so this run can be rolled back.
+    await saveRunFilesSnapshot(runId, files);
+
     phase = "building";
     await persist();
 
@@ -142,80 +124,129 @@ export async function executeBuildRun(runId: string, project: Project, userReque
     let currentFiles = files;
 
     for (const path of [...deletePaths, ...upsertPaths]) {
-      send(emitEvent({ type: "file", status: "start", path }));
+      recordEvent({ path, status: "start" });
     }
     await persist();
 
     for (const path of deletePaths) {
       if (await abortIfCancelled()) return;
       await deleteFile(projectId, path);
-      send(emitEvent({ type: "file", status: "deleted", path }));
+      recordEvent({ path, status: "deleted" });
       currentFiles = currentFiles.filter((file) => file.path !== path);
       await persist();
     }
 
-    const fileResults: { path: string; ok: boolean }[] = [];
+    const fileResults: { path: string; ok: boolean; error?: string }[] = [];
+
+    const generateOne = async (path: string, feedback?: string): Promise<FileOperation | null> =>
+      generateFile(project, currentFiles, builderHistory, path, plan, [...sessionPaths], {
+        feedback,
+        userRequest,
+        shouldAbort: () => isRunCancelled(runId),
+        onRawDelta: (raw) => {
+          const draft = extractPartialFileContent(raw, path);
+          if (draft === null) return;
+          recordEvent({ path, status: "start", draft });
+          const now = Date.now();
+          if (now - lastDraftPersist > 350) {
+            lastDraftPersist = now;
+            void persist();
+          }
+        },
+      });
+
+    const buildOne = async (path: string) => {
+      try {
+        const op = await generateOne(path);
+        if (await isRunCancelled(runId)) return "cancelled" as const;
+
+        if (!op?.path || op.action === "delete") {
+          recordEvent({ path, status: "error", error: "No file content returned" });
+          fileResults.push({ path, ok: false, error: "No file content returned" });
+          return "failed" as const;
+        }
+
+        let savedPath = op.path;
+        let savedContent = op.content ?? "";
+
+        // Static validation: regenerate once with the error as feedback, and
+        // if it still fails, save the best attempt so the user can inspect it.
+        let validation = validateGeneratedFile(savedPath, savedContent);
+        if (!validation.ok) {
+          recordEvent({ path: savedPath, status: "start" });
+          await persist();
+          const retried = await generateOne(path, validation.error);
+          if (await isRunCancelled(runId)) return "cancelled" as const;
+
+          if (retried?.path && retried.action !== "delete") {
+            savedPath = retried.path;
+            savedContent = retried.content ?? "";
+            validation = validateGeneratedFile(savedPath, savedContent);
+          }
+        }
+
+        await upsertFile(projectId, savedPath, savedContent);
+        mergeSessionPaths(sessionPaths, [savedPath]);
+        currentFiles = [
+          ...currentFiles.filter((file) => file.path !== savedPath),
+          { path: savedPath, content: savedContent },
+        ];
+
+        if (validation.ok) {
+          recordEvent({ path: savedPath, status: "done" });
+          fileResults.push({ path: savedPath, ok: true });
+          return "ok" as const;
+        }
+
+        recordEvent({
+          path: savedPath,
+          status: "error",
+          error: `Saved, but ${validation.error}`,
+        });
+        fileResults.push({ path: savedPath, ok: false, error: validation.error });
+        return "failed" as const;
+      } catch (error) {
+        if (await isRunCancelled(runId)) return "cancelled" as const;
+        const message = error instanceof Error ? error.message : "Generation failed";
+        recordEvent({ path, status: "error", error: message });
+        fileResults.push({ path, ok: false, error: message });
+        return "failed" as const;
+      } finally {
+        await persist();
+      }
+    };
 
     for (const path of upsertPaths) {
       if (await abortIfCancelled()) return;
+      if ((await buildOne(path)) === "cancelled") return;
+    }
 
-      try {
-        const op = await generateFile(
-          project,
-          currentFiles,
-          builderHistory,
-          path,
-          plan,
-          [...sessionPaths],
-          {
-            shouldAbort: () => isRunCancelled(runId),
-            onRawDelta: (raw) => {
-              const draft = extractPartialFileContent(raw, path);
-              if (draft === null) return;
-              events = mergeBuildEvent(events, { path, status: "start", draft });
-              const now = Date.now();
-              if (now - lastDraftPersist > 350) {
-                lastDraftPersist = now;
-                void persist();
-              }
-            },
-          }
-        );
+    // Completion pass: generate any @app/ modules the new code imports but
+    // the plan forgot to include, instead of shipping a broken preview.
+    const missing = findMissingLocalImports(currentFiles)
+      .filter((entry) => safePath(entry.path))
+      .slice(0, MAX_AUTO_MODULES);
 
-        if (await abortIfCancelled()) return;
-
-        if (op?.path && op.action !== "delete") {
-          await upsertFile(projectId, op.path, op.content ?? "");
-          mergeSessionPaths(sessionPaths, [op.path]);
-          const next = currentFiles.filter((file) => file.path !== op.path);
-          next.push({ path: op.path, content: op.content ?? "" });
-          currentFiles = next;
-          send(emitEvent({ type: "file", status: "done", path: op.path }));
-          fileResults.push({ path: op.path, ok: true });
-        } else if (await isRunCancelled(runId)) {
-          return;
-        } else {
-          send(emitEvent({
-            type: "file",
-            status: "error",
-            path,
-            error: "No file content returned",
-          }));
-          fileResults.push({ path, ok: false });
-        }
-      } catch (error) {
-        if (await isRunCancelled(runId)) return;
-        const message = error instanceof Error ? error.message : "Generation failed";
-        send(emitEvent({ type: "file", status: "error", path, error: message }));
-        fileResults.push({ path, ok: false });
-      }
+    for (const entry of missing) {
+      if (await abortIfCancelled()) return;
+      recordEvent({ path: entry.path, status: "start" });
       await persist();
+
+      // Extend the plan so this and later generations see the new module.
+      plan.upsert = [...(plan.upsert ?? []), entry.path];
+      plan.briefs = {
+        ...(plan.briefs ?? {}),
+        [entry.path]: `module imported by ${entry.importers.join(", ")} — implement exactly what those importers use`,
+      };
+      if ((await buildOne(entry.path)) === "cancelled") return;
     }
 
     if (await abortIfCancelled()) return;
 
     const succeeded = fileResults.filter((entry) => entry.ok).map((entry) => entry.path);
-    const failed = fileResults.filter((entry) => !entry.ok).map((entry) => entry.path);
+    const failed = fileResults
+      .filter((entry) => !entry.ok)
+      .map(({ path, error }) => ({ path, error }));
 
     await addMessage(
       projectId,

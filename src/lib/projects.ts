@@ -19,16 +19,7 @@ export type Project = {
 
 export const DEFAULT_MODEL = "openrouter/free";
 
-export function safePath(path: string) {
-  return (
-    path.length > 0 &&
-    path.length < 300 &&
-    !path.startsWith("/") &&
-    !path.includes("..") &&
-    !path.startsWith(".") &&
-    !path.includes("\\")
-  );
-}
+export { safePath } from "./paths";
 
 export async function listProjects(userId: string) {
   const r = await turso(
@@ -78,7 +69,32 @@ export async function updateProject(id: string, fields: Record<string, string>) 
 export async function deleteProject(id: string) {
   await turso("DELETE FROM messages WHERE project_id = ?", [id]);
   await turso("DELETE FROM files WHERE project_id = ?", [id]);
+  await turso("DELETE FROM build_runs WHERE project_id = ?", [id]);
   await turso("DELETE FROM projects WHERE id = ?", [id]);
+}
+
+/** Copies a project (files, model, app data — not chat history) for the same owner. */
+export async function duplicateProject(source: Project, name?: string) {
+  const id = nanoid();
+  await turso(
+    `INSERT INTO projects (id, name, description, model, user_id, app_data, openrouter_api_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      (name ?? `${source.name} copy`).slice(0, 80),
+      source.description,
+      source.model,
+      source.user_id,
+      source.app_data ?? "{}",
+      source.openrouter_api_key ?? "",
+    ]
+  );
+
+  const files = await listFiles(source.id);
+  for (const file of files as unknown as { path: string; content: string }[]) {
+    await upsertFile(id, file.path, file.content);
+  }
+  return id;
 }
 
 export async function listMessages(projectId: string) {
@@ -148,6 +164,17 @@ export async function upsertFile(projectId: string, path: string, content: strin
 
 export async function deleteFile(projectId: string, path: string) {
   await turso("DELETE FROM files WHERE project_id = ? AND path = ?", [projectId, path]);
+}
+
+/** Replaces the whole virtual file tree (used by history restore). */
+export async function replaceProjectFiles(
+  projectId: string,
+  files: { path: string; content: string }[]
+) {
+  await turso("DELETE FROM files WHERE project_id = ?", [projectId]);
+  for (const file of files) {
+    await upsertFile(projectId, file.path, file.content);
+  }
 }
 
 export function parseSharedEmails(raw: string) {

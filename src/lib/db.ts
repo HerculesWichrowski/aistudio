@@ -60,11 +60,15 @@ async function migrate() {
     stream_chat TEXT NOT NULL DEFAULT '',
     events_json TEXT NOT NULL DEFAULT '[]',
     error TEXT NOT NULL DEFAULT '',
+    files_snapshot TEXT NOT NULL DEFAULT '',
     created_at INTEGER DEFAULT (unixepoch()),
     updated_at INTEGER DEFAULT (unixepoch())
   )`);
   await turso(
     `CREATE INDEX IF NOT EXISTS build_runs_project_status_idx ON build_runs (project_id, status, created_at DESC)`
+  );
+  await turso(
+    `CREATE INDEX IF NOT EXISTS messages_project_created_idx ON messages (project_id, created_at)`
   );
 
   // Columns added after the original schema; ignore "duplicate column" on existing DBs.
@@ -79,4 +83,7 @@ async function migrate() {
       await turso(`ALTER TABLE projects ADD COLUMN ${column}`);
     } catch {}
   }
+  try {
+    await turso(`ALTER TABLE build_runs ADD COLUMN files_snapshot TEXT NOT NULL DEFAULT ''`);
+  } catch {}
 }

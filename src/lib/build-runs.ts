@@ -31,6 +31,22 @@ export type BuildRunSnapshot = {
   updatedAt: number;
 };
 
+/** A restorable point in project history: the files as they were before a run. */
+export type HistoryEntry = {
+  id: string;
+  summary: string;
+  status: BuildRun["status"];
+  fileCount: number;
+  createdAt: number;
+};
+
+type SnapshotFile = { path: string; content: string };
+
+// Polling endpoints hit these queries every ~450ms; keep files_snapshot
+// (the whole project, as JSON) out of them.
+const RUN_COLUMNS =
+  "id, project_id, status, phase, stream_chat, events_json, error, created_at, updated_at";
+
 function parseEvents(raw: string): BuildRunEvent[] {
   try {
     const parsed = JSON.parse(raw) as BuildRunEvent[];
@@ -66,14 +82,14 @@ export async function createBuildRun(projectId: string) {
 
 export async function getBuildRun(runId: string) {
   await initDB();
-  const result = await turso("SELECT * FROM build_runs WHERE id = ?", [runId]);
+  const result = await turso(`SELECT ${RUN_COLUMNS} FROM build_runs WHERE id = ?`, [runId]);
   return (result.rows?.[0] as unknown as BuildRun) ?? null;
 }
 
 export async function getActiveBuildRun(projectId: string) {
   await initDB();
   const result = await turso(
-    `SELECT * FROM build_runs
+    `SELECT ${RUN_COLUMNS} FROM build_runs
      WHERE project_id = ? AND status = 'running'
      ORDER BY created_at DESC
      LIMIT 1`,
@@ -119,6 +135,73 @@ export async function patchBuildRun(
 
   args.push(runId);
   await turso(`UPDATE build_runs SET ${sets.join(", ")} WHERE id = ?`, args);
+}
+
+/** Stores the project's files as they were BEFORE this run changed anything. */
+export async function saveRunFilesSnapshot(runId: string, files: SnapshotFile[]) {
+  await initDB();
+  await turso("UPDATE build_runs SET files_snapshot = ? WHERE id = ?", [
+    JSON.stringify(files.map(({ path, content }) => ({ path, content }))),
+    runId,
+  ]);
+}
+
+export async function getRunFilesSnapshot(runId: string): Promise<SnapshotFile[] | null> {
+  await initDB();
+  const result = await turso("SELECT files_snapshot FROM build_runs WHERE id = ?", [runId]);
+  const raw = (result.rows?.[0] as { files_snapshot?: string } | undefined)?.files_snapshot;
+  if (!raw?.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw) as SnapshotFile[];
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Finished runs that captured a pre-build snapshot, newest first. */
+export async function listRestorableRuns(projectId: string, limit = 30): Promise<HistoryEntry[]> {
+  await initDB();
+  const result = await turso(
+    `SELECT id, status, stream_chat, files_snapshot, created_at FROM build_runs
+     WHERE project_id = ? AND status != 'running' AND files_snapshot != ''
+     ORDER BY created_at DESC, id DESC
+     LIMIT ?`,
+    [projectId, limit]
+  );
+
+  const entries: HistoryEntry[] = [];
+  for (const row of (result.rows ?? []) as unknown as (BuildRun & { files_snapshot: string })[]) {
+    let fileCount = 0;
+    try {
+      const files = JSON.parse(row.files_snapshot) as SnapshotFile[];
+      fileCount = Array.isArray(files) ? files.length : 0;
+    } catch {}
+    entries.push({
+      id: row.id,
+      summary: (row.stream_chat ?? "").trim().split("\n")[0]?.slice(0, 200) ?? "",
+      status: row.status,
+      fileCount,
+      createdAt: row.created_at,
+    });
+  }
+  return entries;
+}
+
+/** Records a synthetic, restorable run (used to checkpoint before a restore). */
+export async function recordCheckpointRun(
+  projectId: string,
+  summary: string,
+  files: SnapshotFile[]
+) {
+  await initDB();
+  const id = nanoid();
+  await turso(
+    `INSERT INTO build_runs (id, project_id, status, phase, stream_chat, events_json, error, files_snapshot)
+     VALUES (?, ?, 'done', 'idle', ?, '[]', '', ?)`,
+    [id, projectId, summary, JSON.stringify(files.map(({ path, content }) => ({ path, content })))]
+  );
+  return id;
 }
 
 export function mergeBuildEvent(events: BuildRunEvent[], event: BuildRunEvent) {

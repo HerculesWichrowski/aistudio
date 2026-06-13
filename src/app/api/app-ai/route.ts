@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { initDB } from "@/lib/db";
 import { getProject } from "@/lib/projects";
 import { openRouterHeaders, resolveModel } from "@/lib/openrouter";
+import { clientIp, rateLimit } from "@/lib/rate-limit";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -26,6 +27,14 @@ export async function POST(req: NextRequest) {
   const { projectId, messages, json } = body;
   if (!projectId || !Array.isArray(messages) || messages.length === 0 || messages.length > 50) {
     return new Response("Expected { projectId, messages }", { status: 400, headers: CORS_HEADERS });
+  }
+
+  const limited = rateLimit(`ai:${projectId}:${clientIp(req)}`, 20, 60_000);
+  if (!limited.ok) {
+    return new Response("Too many AI requests — slow down and retry shortly", {
+      status: 429,
+      headers: { ...CORS_HEADERS, "Retry-After": String(limited.retryAfterSec) },
+    });
   }
 
   const project = await getProject(projectId);

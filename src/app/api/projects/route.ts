@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
   const project = await createProject(
     userId,
     name.trim().slice(0, 80),
-    description ?? "",
+    String(description ?? "").slice(0, 300),
     resolvedModel
   );
   return Response.json(project, { status: 201 });

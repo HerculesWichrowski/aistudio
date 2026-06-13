@@ -1,6 +1,13 @@
-type VirtualFile = { path: string; content: string };
+import {
+  APP_IMPORT_PREFIX,
+  collectImportSpecifiers,
+  isBareSpecifier,
+  packageRoot,
+} from "./imports";
 
-export const APP_IMPORT_PREFIX = "@app/";
+export { APP_IMPORT_PREFIX } from "./imports";
+
+type VirtualFile = { path: string; content: string };
 
 function moduleDataUrl(code: string) {
   return `data:text/javascript;charset=utf-8,${encodeURIComponent(code)}`;
@@ -34,9 +41,46 @@ function buildAppImportMap(files: VirtualFile[]) {
   return imports;
 }
 
+/**
+ * Fills import-map gaps for bare npm specifiers used by the app's JS.
+ * Models routinely import a package without updating the import map in
+ * index.html; instead of a "Failed to resolve module specifier" runtime
+ * crash, missing entries are pointed at esm.sh (reusing the mapped package
+ * root's pinned version for subpath imports when available).
+ */
+export function autoResolveBareImports(
+  files: VirtualFile[],
+  imports: Record<string, string>
+) {
+  const resolved = { ...imports };
+
+  for (const file of files) {
+    if (!file.path.endsWith(".js")) continue;
+    for (const spec of collectImportSpecifiers(file.content)) {
+      if (!isBareSpecifier(spec) || resolved[spec]) continue;
+
+      const root = packageRoot(spec);
+      // Trailing-slash mappings ("lit/": "https://…/") already cover subpaths.
+      if (spec !== root && resolved[`${root}/`]) continue;
+
+      if (spec !== root && resolved[root]) {
+        resolved[spec] = `${resolved[root].replace(/\/+$/, "")}${spec.slice(root.length)}`;
+      } else {
+        resolved[spec] = `https://esm.sh/${spec}`;
+      }
+    }
+  }
+
+  return resolved;
+}
+
 /** Resolve local ES modules via an import map and @app/ specifiers. */
 export function injectModuleLoader(html: string, files: VirtualFile[]) {
-  const mergedImports = { ...readHtmlImportMap(html), ...buildAppImportMap(files) };
+  const htmlImports = readHtmlImportMap(html);
+  const mergedImports = autoResolveBareImports(files, {
+    ...htmlImports,
+    ...buildAppImportMap(files),
+  });
   let out = stripHtmlImportMap(html);
 
   out = out.replace(
